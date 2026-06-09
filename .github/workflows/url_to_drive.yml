@@ -35,9 +35,9 @@ jobs:
       - name: Copy file from URL to Drive
         env:
           # <-- שנה כאן את הקישור של הקובץ שאתה רוצה לשמור -->
-          FILE_URL: https://www.prog.co.il/attachments/%D7%A9%D7%97%D7%9E%D7%98-%D7%A2%D7%9D-%D7%97%D7%99%D7%93%D7%95%D7%AA-html.2266673/
+          FILE_URL: https://www.prog.co.il/attachments/minesweeper-html.2266683/
           # שם הקובץ בתיקיית Drive (ניתן לשנות)
-          DEST_PATH: gdrive:MyUploads/שחמט-עם-חידות.html
+          DEST_PATH: gdrive:MyUploads/minesweeper-html
         run: |
           set -e
           echo "🟢 Trying rclone copyurl …"
