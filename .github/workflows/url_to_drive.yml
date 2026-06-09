@@ -1,0 +1,49 @@
+name: Upload any URL → Google Drive (Free)
+
+on:
+  workflow_dispatch:      # מאפשר הרצה ידנית מה‑UI
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      # --------------------------------------------------------------
+      # 1️⃣ התקנת rclone
+      # --------------------------------------------------------------
+      - name: Install rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+
+      # --------------------------------------------------------------
+      # 2️⃣ בניית קובץ הקונפיג של rclone (remote בשם gdrive)
+      # --------------------------------------------------------------
+      - name: Write rclone config
+        env:
+          RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive.file
+          token = $RCLONE_GDRIVE_TOKEN
+          EOF
+
+      # --------------------------------------------------------------
+      # 3️⃣ העתקת קובץ מה‑URL ל‑Drive
+      # --------------------------------------------------------------
+      - name: Copy file from URL to Drive
+        env:
+          # <-- שנה כאן את הקישור של הקובץ שאתה רוצה לשמור -->
+          FILE_URL: https://www.prog.co.il/attachments/%D7%A9%D7%97%D7%9E%D7%98-%D7%A2%D7%9D-%D7%97%D7%99%D7%93%D7%95%D7%AA-html.2266673/
+          # שם הקובץ בתיקיית Drive (ניתן לשנות)
+          DEST_PATH: gdrive:MyUploads/שחמט-עם-חידות.html
+        run: |
+          set -e
+          echo "🟢 Trying rclone copyurl …"
+          if rclone copyurl "$FILE_URL" "$DEST_PATH" --progress; then
+            echo "✅ copyurl succeeded"
+          else
+            echo "⚠️ copyurl failed – falling back to wget+rcat"
+            wget -q -O - "$FILE_URL" | rclone rcat "$DEST_PATH" --progress
+          fi
