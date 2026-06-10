@@ -1,38 +1,35 @@
-name: Upload URL → Google Drive (with optional compression)
+name: Upload URL → Google Drive (auto‑extension)
 
-# אפשר להריץ ידנית ולספק קיבוץ של קבצים
+# מאפשר בחירה של URL, סוג דחיסה, ותיקיית יעד ב‑Drive
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "URL של הקובץ לשאוב"
+        description: "URL של הקובץ שיש להוריד"
         required: true
         default: "https://www.prog.co.il/attachments/%D7%A9%D7%97%D7%9E%D7%98-%D7%A2%D7%9D-%D7%97%D7%99%D7%93%D7%95%D7%AA-html.2266673/"
       compress:
-        description: "סוג דחיסה – none|zip|tgz"
+        description: "סוג דחיסה – none | zip | tgz"
         required: true
         default: "none"
-      dest:
-        description: "נתיב יעד ב‑Drive (כולל שם קובץ/סיומת). אם רלוונטי, הקפד לכלול .zip או .tgz"
+      folder:
+        description: "תיקיית יעד ב‑Drive (בלי שם קובץ). לדוגמה: MyUploads"
         required: true
-        default: "MyUploads/שחמט-עם-חידות.html"
+        default: "MyUploads"
 
 jobs:
   upload:
     runs-on: ubuntu-latest
     steps:
       # --------------------------------------------------------------
-      # 1️⃣ התקנת rclone (והתקנת zip אם בחרת ב‑zip)
+      # 1️⃣ התקנת rclone (zip כבר מותקן במערכת)
       # --------------------------------------------------------------
-      - name: Install rclone (and zip/tar)
+      - name: Install rclone
         run: |
           curl https://rclone.org/install.sh | sudo bash
-          # zip ו‑tar כבר מותקנות ב‑ubuntu‑latest, אבל נוודא שה‑zip קיים
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq zip
 
       # --------------------------------------------------------------
-      # 2️⃣ כתיבת קובץ הקונפיג של rclone (remote בשם gdrive)
+      # 2️⃣ כתיבת קובץ קונפיג של rclone (remote בשם gdrive)
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
@@ -47,54 +44,96 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣ (אופציונלי) מחיקת קובץ קיים באותו שם – למנוע “Overwrite”
+      # 3️⃣ בניית שם קובץ נכון ( עם סיומת ) לפני ההעלאה
       # --------------------------------------------------------------
-      - name: Delete existing remote file (if any)
+      - name: Determine final file name
+        id: name_builder
         env:
-          DEST_PATH: gdrive:${{ github.event.inputs.dest }}
+          FILE_URL: ${{ github.event.inputs.url }}
+          COMPRESS: ${{ github.event.inputs.compress }}
+          FOLDER: ${{ github.event.inputs.folder }}
         run: |
-          if rclone lsf "$DEST_PATH" > /dev/null 2>&1; then
-            echo "🗑️ Deleting previous $DEST_PATH"
-            rclone delete "$DEST_PATH"
+          set -e
+
+          # ---- שלב 1 – קבלת שם קובץ גלוי מה‑URL --------------------
+          # basename עובר על החלק אחרי ה‑last slash
+          raw_name=$(basename "$FILE_URL")
+          # אם יש ?query – מסירים
+          raw_name=${raw_name%%\?*}
+          # decode %XX (הפיכת קידוד %D7%AA וכו')
+          decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
+          echo "🗂️ Raw name from URL = $raw_name"
+          echo "🔤 Decoded name    = $decoded_name"
+
+          # ---- שלב 2 – קביעת סיומת לפי compression ----------------
+          case "$COMPRESS" in
+            zip)  EXT=".zip"   ;;
+            tgz)  EXT=".tgz"   ;;
+            none) EXT=""       ;;
+            *)    echo "❌ Unknown compress value: $COMPRESS" && exit 1 ;;
+          esac
+
+          # אם יש compression – נוריד את ההרחבה המקורית (אם יש) כדי
+          # שלא ייווצרו שמות כמו "song.html.zip"
+          if [[ -n "$EXT" ]]; then
+            # strip existing extension (everything after last dot)
+            base_without_ext="${decoded_name%.*}"
+            final_name="${base_without_ext}${EXT}"
+          else
+            # ללא compression – משאירים את השם המקורי
+            final_name="${decoded_name}"
+          fi
+
+          echo "📦 Final name that will be used in Drive = $final_name"
+
+          # שמירת ערכים ל‑outputs כדי שנשתמש בהם בשלבים הבאים
+          echo "final_name=$final_name" >> $GITHUB_OUTPUT
+          echo "final_path=gdrive:${FOLDER}/${final_name}" >> $GITHUB_OUTPUT
+
+      # --------------------------------------------------------------
+      # 4️⃣ (אופציונלי) מחיקת קובץ קיים באותו שם לפני העלאה
+      # --------------------------------------------------------------
+      - name: Delete existing file in Drive (if any)
+        env:
+          REMOTE_PATH: ${{ steps.name_builder.outputs.final_path }}
+        run: |
+          if rclone lsf "$REMOTE_PATH" > /dev/null 2>&1; then
+            echo "🗑️  Deleting old file $REMOTE_PATH"
+            rclone delete "$REMOTE_PATH"
           else
             echo "✅ No previous file found"
           fi
 
       # --------------------------------------------------------------
-      # 4️⃣ הורדה → (דחיסה אם נדרש) → העלאה ל‑Drive
+      # 5️⃣ הורדה → (דחיסה אם נדרש) → העלאה ל‑Drive
       # --------------------------------------------------------------
       - name: Transfer (download → optional compress → upload)
         env:
           FILE_URL: ${{ github.event.inputs.url }}
           COMPRESS: ${{ github.event.inputs.compress }}
-          # שים לב: אם בחירתך היא zip או tgz, יש לעדכן את שם הקובץ ב‑dest כך שיכלול את הסיומת המתאימה
-          DEST_PATH: gdrive:${{ github.event.inputs.dest }}
+          DEST_PATH: ${{ steps.name_builder.outputs.final_path }}
         run: |
-          set -e  # עצור אם משהו נכשל
+          set -e
 
           echo "🔎 INPUTS"
           echo "URL      = $FILE_URL"
           echo "COMPRESS = $COMPRESS"
           echo "DEST     = $DEST_PATH"
 
-          # --------- תחביר קונפיגורציית הקומפרסור ----------
-          # נבנה את הפקודה הרצויה שתועבר ל‑stdout של wget
+          # ---------- אין דחיסה ----------
           if [[ "$COMPRESS" == "none" ]]; then
-            # אין שינוי – מעבירים את הקובץ כפי שהוא
             echo "🚀 No compression – streaming raw file"
             wget -q -O - "$FILE_URL" | rclone rcat "$DEST_PATH" --progress
 
+          # ---------- ZIP ----------
           elif [[ "$COMPRESS" == "zip" ]]; then
-            # zip מקבל קובץ מה‑stdin ויוצר zip על‑הדף
-            #   -q   : silent
-            #   -   : read from stdin, שם קובץ פנימי הוא “data”
-            #   -     (second dash) : כתיבה ל‑stdout (ה‑zip המלא)
-            echo "📦 Compressing with ZIP"
+            # zip קורא מ‑stdin, יוצר zip על‑הדף, כותב ל‑stdout
+            echo "📦 Compressing with ZIP (stream → zip → rclone)"
             wget -q -O - "$FILE_URL" | zip -q - - | rclone rcat "$DEST_PATH" --progress
 
+          # ---------- TGZ ----------
           elif [[ "$COMPRESS" == "tgz" ]]; then
-            # tar + gzip → streaming
-            echo "📦 Compressing with tar.gz (tgz)"
+            echo "📦 Compressing with tar.gz (tgz) (stream → tar → gzip → rclone)"
             wget -q -O - "$FILE_URL" | tar -czf - - | rclone rcat "$DEST_PATH" --progress
 
           else
