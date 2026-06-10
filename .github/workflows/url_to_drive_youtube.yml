@@ -1,10 +1,10 @@
-name: YouTube → Drive (download → zip/tgz → upload)
+name: YouTube → Google Drive (download → zip/tgz → upload)
 
 on:
   workflow_dispatch:
     inputs:
       youtube_url:
-        description: "קישור של סרטון YouTube (לדוגמה https://www.youtube.com/watch?v=ABC123)"
+        description: "קישור של סרטון YouTube"
         required: true
         default: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
       compress:
@@ -12,7 +12,7 @@ on:
         required: true
         default: "zip"
       folder:
-        description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
+        description: "תיקיית יעד ב‑Drive (ללא שם קובץ). לדוגמה: MyYouTube"
         required: true
         default: "MyYouTube"
       filename:
@@ -25,12 +25,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # --------------------------------------------------------------
-      # 0️⃣  Enable extra debug (optional – see Settings → Secrets → Add secret)
+      # 0️⃣  Debug – optional (set secret ACTIONS_STEP_DEBUG=true)
       # --------------------------------------------------------------
-      #   Secret name: ACTIONS_STEP_DEBUG   value: true
 
       # --------------------------------------------------------------
-      # 1️⃣ Install all needed binaries (rclone, yt‑dlp, ffmpeg)
+      # 1️⃣  Install rclone, yt‑dlp וב‑ffmpeg (חובה למיזוג video+audio)
       # --------------------------------------------------------------
       - name: Install dependencies
         run: |
@@ -43,10 +42,10 @@ jobs:
           sudo apt-get install -y -qq python3-pip
           python3 -m pip install --quiet yt-dlp
 
-          echo "🔧 Installing ffmpeg (mandatory for YouTube merging) …"
+          echo "🔧 Installing ffmpeg …"
           sudo apt-get install -y -qq ffmpeg
 
-          # zip & tar כבר קיימים במערכת, אך נוודא שה‑locale הוא UTF‑8
+          # ו‑locale שמקודד כ‑UTF‑8 (מתאים לשמות עבריים)
           sudo locale-gen en_US.UTF-8
           export LANG=en_US.UTF-8
           export LC_ALL=en_US.UTF-8
@@ -68,7 +67,7 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣  קביעת שמות הקבצים (archive‑name, internal‑name, extension)
+      # 3️⃣  קביעת שמות קבצים – שם קובץ המקור, שם קובץ ארכיון, שם קובץ ב‑Drive
       # --------------------------------------------------------------
       - name: Determine filenames
         id: name_builder
@@ -78,146 +77,139 @@ jobs:
           COMPRESS: ${{ github.event.inputs.compress }}
           FOLDER: ${{ github.event.inputs.folder }}
         run: |
-          set -e -x   # מדפיס כל פקודה לפני הריצה (עוזר לדיבוג)
+          set -e -x   # מדפיס כל פקודה לפני הריצה (דיבוג)
 
-          # ---------- שלב 1 – קבלת שם קובץ “ידידותי” מה‑YouTube ----------
+          # ---- שם הקובץ שמחזיר YouTube (כולל סיומת) ----
           raw_name=$(yt-dlp --get-filename -o "%(title)s.%(ext)s" "$YOUTUBE_URL")
           echo "🔤 Raw name from YouTube = $raw_name"
 
-          # ---------- שלב 2 – שם הקובץ הפנימי (שם בתוך ה‑ZIP/TGZ) ----------
+          # ---- שם הקובץ במערכת הקבצים (כולל סיומת) ----
           if [[ -n "$USER_NAME" ]]; then
+            # משתמש סיפק שם ידני – משמרים את הסיומת המקורית של הקובץ
             base_name="$USER_NAME"
-            # שמירת הסיומת המקורית של הקובץ שה‑YouTube מספק
             original_ext="${raw_name##*.}"
-            internal_name="${base_name}.${original_ext}"
+            local_file="${base_name}.${original_ext}"
           else
             base_name="${raw_name%.*}"      # שם ללא סיומת
-            internal_name="$raw_name"       # שם כולל סיומת (mp4, webm, mkv …)
+            local_file="$raw_name"          # כולל הסיומת המקורית
           fi
 
-          # ---------- שלב 3 – שם קובץ הארכיון ----------
+          # ---- שם קובץ ארכיון (zip/tgz) – אם אין דחיסה נשאר שם הקובץ המקורי ----
           case "$COMPRESS" in
-            none) archive_name="$internal_name" ;;
+            none) archive_name="$local_file" ;;
             zip)  archive_name="${base_name}.zip" ;;
             tgz)  archive_name="${base_name}.tgz" ;;
             *)    echo "❌ Unknown compress option: $COMPRESS" && exit 1 ;;
           esac
 
           echo "📦 Archive name (will be uploaded) = $archive_name"
-          echo "📁 Internal name inside archive    = $internal_name"
+          echo "📁 Local video file name           = $local_file"
 
-          # נתיב מלא ב‑Drive
-          remote_path="gdrive:${FOLDER}/${archive_name}"
+          # נתיב קבוע בתיקיית /tmp (ה‑runner מנקה אחרי הריצה)
+          VIDEO_PATH="/tmp/$local_file"
+          ARCHIVE_PATH="/tmp/$archive_name"
 
-          # שמירת ערכים ל‑outputs
+          echo "video_path=$VIDEO_PATH"   >> $GITHUB_OUTPUT
+          echo "archive_path=$ARCHIVE_PATH" >> $GITHUB_OUTPUT
           echo "archive_name=$archive_name" >> $GITHUB_OUTPUT
-          echo "internal_name=$internal_name" >> $GITHUB_OUTPUT
-          echo "remote_path=$remote_path" >> $GITHUB_OUTPUT
+          echo "remote_folder=gdrive:${FOLDER}" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 4️⃣  (אופציונלי) מחיקת קובץ קיים באותו שם
+      # 4️⃣  (אופציונלי) מחיקת קובץ קיים באותו שם בתיקיית Drive
       # --------------------------------------------------------------
       - name: Delete previous file (if any)
         env:
-          REMOTE_PATH: ${{ steps.name_builder.outputs.remote_path }}
+          REMOTE_FOLDER: ${{ steps.name_builder.outputs.remote_folder }}
+          ARCHIVE_NAME: ${{ steps.name_builder.outputs.archive_name }}
         run: |
           set -e
-          if rclone lsf "$REMOTE_PATH" > /dev/null 2>&1; then
-            echo "🗑️ Deleting old $REMOTE_PATH"
-            rclone delete "$REMOTE_PATH"
+          if rclone lsf "${REMOTE_FOLDER}/${ARCHIVE_NAME}" > /dev/null 2>&1; then
+            echo "🗑️ Deleting old ${REMOTE_FOLDER}/${ARCHIVE_NAME}"
+            rclone delete "${REMOTE_FOLDER}/${ARCHIVE_NAME}"
           else
             echo "✅ No previous file found"
           fi
 
       # --------------------------------------------------------------
-      # 5️⃣  הורדת הסרטון ל‑קובץ זמני
+      # 5️⃣  הורדת הסרטון ל‑קובץ מקומי
       # --------------------------------------------------------------
       - name: Download video to temporary file
         id: download
         env:
           YOUTUBE_URL: ${{ github.event.inputs.youtube_url }}
+          VIDEO_PATH: ${{ steps.name_builder.outputs.video_path }}
         run: |
           set -e -x
-          # נבחר את הפורמט הממוזג (audio + video) הטוב ביותר ששומף לקובץ יחיד.
-          # פורמט זה מחזיר קובץ עם סיומת (mp4, webm, mkv …) ולכן נקבל אותו ישירות.
-          OUTPUT_PATH="/tmp/video_download"
-          yt-dlp -f best -o "$OUTPUT_PATH.%(ext)s" "$YOUTUBE_URL"
-          # מציג את שם הקובץ המלא שנוצר (ב‑stdout)
-          REAL_FILE=$(ls $OUTPUT_PATH.*)
-          echo "downloaded_file=$REAL_FILE" >> $GITHUB_OUTPUT
-          echo "✅ Download finished: $REAL_FILE"
-          # מציג כמה מגיב (כדי לוודא שהקובץ לא ריק)
-          ls -lh "$REAL_FILE"
+          # -f best – משיג את ה‑best format (audio+video במקביל)
+          yt-dlp -f best -o "$VIDEO_PATH" "$YOUTUBE_URL"
+          echo "✅ Download finished → $VIDEO_PATH"
+          ls -lh "$VIDEO_PATH"
 
       # --------------------------------------------------------------
-      # 6️⃣  יצירת ארכיון (ZIP או TGZ) – משתמשים בקובץ שהורד
+      # 6️⃣  יצירת ארכיון (ZIP / TGZ) או שמירה ישירה אם compress=none
       # --------------------------------------------------------------
-      - name: Create archive (zip / tgz / none)
+      - name: Create archive (or keep raw video)
         id: archive
         env:
-          INTERNAL_NAME: ${{ steps.name_builder.outputs.internal_name }}
           COMPRESS: ${{ github.event.inputs.compress }}
-          DOWNLOAD_FILE: ${{ steps.download.outputs.downloaded_file }}
-          ARCHIVE_PATH: /tmp/archive_file     # שם זמני (לא כולל סיומת)
+          VIDEO_PATH: ${{ steps.name_builder.outputs.video_path }}
+          ARCHIVE_PATH: ${{ steps.name_builder.outputs.archive_path }}
         run: |
           set -e -x
-
-          # ניקוי ארכיון קיים (ב‑/tmp) למקרה של ריצה קודמת באותו רץ
-          rm -f "$ARCHIVE_PATH".zip "$ARCHIVE_PATH".tgz
-
           if [[ "$COMPRESS" == "none" ]]; then
-            # אין ארכיון – נעתיק את הקובץ המקורי למיקום ש‑rclone ייקח ממנו.
-            cp "$DOWNLOAD_FILE" "$ARCHIVE_PATH"
-            echo "archive_file=$ARCHIVE_PATH" >> $GITHUB_OUTPUT
+            # אין ארכיון – פשוט מחזירים את קובץ ה‑video כמקור
+            echo "archive_file=$VIDEO_PATH" >> $GITHUB_OUTPUT
             exit 0
           fi
 
           if [[ "$COMPRESS" == "zip" ]]; then
-            # zip קורא מ‑stdin, אבל כאן נשתמש ב‑file‑mode כדי לשמור שם פנימי מדויק:
-            zip -q "$ARCHIVE_PATH.zip" "$INTERNAL_NAME" "$DOWNLOAD_FILE"
-            echo "archive_file=$ARCHIVE_PATH.zip" >> $GITHUB_OUTPUT
+            # zip יוצר קובץ zip בשם $ARCHIVE_PATH, ושומר בתוכו את קובץ ה‑video בשם המקורי שלו
+            zip -j -q "$ARCHIVE_PATH" "$VIDEO_PATH"
+            echo "archive_file=$ARCHIVE_PATH" >> $GITHUB_OUTPUT
             exit 0
           fi
 
           if [[ "$COMPRESS" == "tgz" ]]; then
-            # tar –‑transform מוודא שהקובץ שבתוך ה‑tgz יקרא בשם INTERNAL_NAME
-            tar --transform="s|.*|$INTERNAL_NAME|" -czf "$ARCHIVE_PATH.tgz" -C "$(dirname "$DOWNLOAD_FILE")" "$(basename "$DOWNLOAD_FILE")"
-            echo "archive_file=$ARCHIVE_PATH.tgz" >> $GITHUB_OUTPUT
+            # tar –‑czf יוצר tgz, שומר על שם הקובץ המקורי בתוך ה‑archive
+            tar -czf "$ARCHIVE_PATH" -C "$(dirname "$VIDEO_PATH")" "$(basename "$VIDEO_PATH")"
+            echo "archive_file=$ARCHIVE_PATH" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          echo "❌ Unknown compress option"
+          echo "❌ Should never reach here"
           exit 1
 
       # --------------------------------------------------------------
-      # 7️⃣  העלאת הקובץ (ארכיון או קובץ רגיל) ל‑Google Drive
+      # 7️⃣  העלאת הקובץ (archive או video) ל‑Google Drive
       # --------------------------------------------------------------
-      - name: Upload archive / video to Drive
+      - name: Upload to Drive
         env:
-          DEST_PATH: ${{ steps.name_builder.outputs.remote_path }}
+          REMOTE_FOLDER: ${{ steps.name_builder.outputs.remote_folder }}
           ARCHIVE_FILE: ${{ steps.archive.outputs.archive_file }}
         run: |
           set -e -x
-          echo "📤 Uploading $ARCHIVE_FILE → $DEST_PATH"
-          rclone copy "$ARCHIVE_FILE" "$DEST_PATH" --progress
+          echo "📤 Uploading $ARCHIVE_FILE → $REMOTE_FOLDER"
+          # rclone copy משמר את שם הקובץ (basename של $ARCHIVE_FILE) בתיקייה המרוחקת
+          rclone copy "$ARCHIVE_FILE" "$REMOTE_FOLDER" --progress
 
       # --------------------------------------------------------------
-      # 8️⃣  בדיקה – רשימת קבצים בתיקיית ה‑Drive לאחר ההעלאה
+      # 8️⃣  בדיקה – מציג את הקבצים שבתיקיית Drive אחרי ההעלאה
       # --------------------------------------------------------------
-      - name: List files in the target folder (debug)
+      - name: List files in Drive folder (debug)
         env:
-          REMOTE_DIR: "gdrive:${{ github.event.inputs.folder }}"
+          REMOTE_FOLDER: ${{ steps.name_builder.outputs.remote_folder }}
         run: |
           set -e -x
-          echo "📂 Files that now exist in $REMOTE_DIR :"
-          rclone lsf "$REMOTE_DIR"
+          echo "📂 Files now present in $REMOTE_FOLDER :"
+          rclone lsf "$REMOTE_FOLDER"
 
       # --------------------------------------------------------------
-      # 9️⃣  ניקוי קבצים זמניים (הצעד האחרון, כדי ש‑/tmp לא יתמלא)
+      # 9️⃣  ניקוי קבצים זמניים (רצוי כדי שלא למלא את ה‑/tmp של ה‑runner)
       # --------------------------------------------------------------
       - name: Clean up temporary files
         if: always()
         run: |
           set -e
           rm -rf /tmp/video_download*
-          rm -rf /tmp/archive_file*
+          rm -rf /tmp/*.zip
+          rm -rf /tmp/*.tgz
