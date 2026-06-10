@@ -1,0 +1,103 @@
+name: Upload URL → Google Drive (with optional compression)
+
+# אפשר להריץ ידנית ולספק קיבוץ של קבצים
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL של הקובץ לשאוב"
+        required: true
+        default: "https://www.prog.co.il/attachments/%D7%A9%D7%97%D7%9E%D7%98-%D7%A2%D7%9D-%D7%97%D7%99%D7%93%D7%95%D7%AA-html.2266673/"
+      compress:
+        description: "סוג דחיסה – none|zip|tgz"
+        required: true
+        default: "none"
+      dest:
+        description: "נתיב יעד ב‑Drive (כולל שם קובץ/סיומת). אם רלוונטי, הקפד לכלול .zip או .tgz"
+        required: true
+        default: "MyUploads/שחמט-עם-חידות.html"
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      # --------------------------------------------------------------
+      # 1️⃣ התקנת rclone (והתקנת zip אם בחרת ב‑zip)
+      # --------------------------------------------------------------
+      - name: Install rclone (and zip/tar)
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          # zip ו‑tar כבר מותקנות ב‑ubuntu‑latest, אבל נוודא שה‑zip קיים
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zip
+
+      # --------------------------------------------------------------
+      # 2️⃣ כתיבת קובץ הקונפיג של rclone (remote בשם gdrive)
+      # --------------------------------------------------------------
+      - name: Write rclone config
+        env:
+          RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive.file
+          token = $RCLONE_GDRIVE_TOKEN
+          EOF
+
+      # --------------------------------------------------------------
+      # 3️⃣ (אופציונלי) מחיקת קובץ קיים באותו שם – למנוע “Overwrite”
+      # --------------------------------------------------------------
+      - name: Delete existing remote file (if any)
+        env:
+          DEST_PATH: gdrive:${{ github.event.inputs.dest }}
+        run: |
+          if rclone lsf "$DEST_PATH" > /dev/null 2>&1; then
+            echo "🗑️ Deleting previous $DEST_PATH"
+            rclone delete "$DEST_PATH"
+          else
+            echo "✅ No previous file found"
+          fi
+
+      # --------------------------------------------------------------
+      # 4️⃣ הורדה → (דחיסה אם נדרש) → העלאה ל‑Drive
+      # --------------------------------------------------------------
+      - name: Transfer (download → optional compress → upload)
+        env:
+          FILE_URL: ${{ github.event.inputs.url }}
+          COMPRESS: ${{ github.event.inputs.compress }}
+          # שים לב: אם בחירתך היא zip או tgz, יש לעדכן את שם הקובץ ב‑dest כך שיכלול את הסיומת המתאימה
+          DEST_PATH: gdrive:${{ github.event.inputs.dest }}
+        run: |
+          set -e  # עצור אם משהו נכשל
+
+          echo "🔎 INPUTS"
+          echo "URL      = $FILE_URL"
+          echo "COMPRESS = $COMPRESS"
+          echo "DEST     = $DEST_PATH"
+
+          # --------- תחביר קונפיגורציית הקומפרסור ----------
+          # נבנה את הפקודה הרצויה שתועבר ל‑stdout של wget
+          if [[ "$COMPRESS" == "none" ]]; then
+            # אין שינוי – מעבירים את הקובץ כפי שהוא
+            echo "🚀 No compression – streaming raw file"
+            wget -q -O - "$FILE_URL" | rclone rcat "$DEST_PATH" --progress
+
+          elif [[ "$COMPRESS" == "zip" ]]; then
+            # zip מקבל קובץ מה‑stdin ויוצר zip על‑הדף
+            #   -q   : silent
+            #   -   : read from stdin, שם קובץ פנימי הוא “data”
+            #   -     (second dash) : כתיבה ל‑stdout (ה‑zip המלא)
+            echo "📦 Compressing with ZIP"
+            wget -q -O - "$FILE_URL" | zip -q - - | rclone rcat "$DEST_PATH" --progress
+
+          elif [[ "$COMPRESS" == "tgz" ]]; then
+            # tar + gzip → streaming
+            echo "📦 Compressing with tar.gz (tgz)"
+            wget -q -O - "$FILE_URL" | tar -czf - - | rclone rcat "$DEST_PATH" --progress
+
+          else
+            echo "❗ Unknown compress option: $COMPRESS"
+            exit 1
+          fi
