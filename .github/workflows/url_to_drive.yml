@@ -1,7 +1,17 @@
 name: Upload any URL → Google Drive (Free)
 
+# מאפשר קבלת פרמטרים דרך ממשק ה‑UI של GitHub Actions
 on:
-  workflow_dispatch:      # מאפשר הרצה ידנית מה‑UI
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL של הקובץ שברצונך להעלות ל‑Drive'
+        required: true
+        default: 'https://www.prog.co.il/attachments/%D7%A9%D7%97%D7%9E%D7%98-%D7%A2%D7%9D-%D7%97%D7%99%D7%93%D7%95%D7%AA-html.2266673/'
+      dest:
+        description: 'נתיב יעד ב‑Drive (לדוגמה: MyUploads/file.html)'
+        required: true
+        default: 'MyUploads/שחמט-עם-חידות.html'
 
 jobs:
   upload:
@@ -15,7 +25,7 @@ jobs:
           curl https://rclone.org/install.sh | sudo bash
 
       # --------------------------------------------------------------
-      # 2️⃣ בניית קובץ הקונפיג של rclone (remote בשם gdrive)
+      # 2️⃣ יצירת קובץ קונפיג של rclone (remote בשם gdrive)
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
@@ -30,14 +40,13 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣ העתקת קובץ מה‑URL ל‑Drive
+      # 3️⃣ העתקת הקובץ מה‑URL ל‑Drive
       # --------------------------------------------------------------
       - name: Copy file from URL to Drive
         env:
-          # <-- שנה כאן את הקישור של הקובץ שאתה רוצה לשמור -->
-          FILE_URL: https://ahblicklive.com/new_ded_video/26/23/VnOMPDVrju0PTSBRnvz/NNHEEG/480.mp4
-          # שם הקובץ בתיקיית Drive (ניתן לשנות)
-          DEST_PATH: gdrive:MyUploads/סרטון
+          # קבלת ערכי הקלט שהוגדרו ב‑workflow_dispatch
+          FILE_URL: ${{ github.event.inputs.url }}
+          DEST_PATH: gdrive:${{ github.event.inputs.dest }}
         run: |
           set -e
           echo "🟢 Trying rclone copyurl …"
