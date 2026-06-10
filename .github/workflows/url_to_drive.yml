@@ -35,9 +35,9 @@ jobs:
       - name: Copy file from URL to Drive
         env:
           # <-- שנה כאן את הקישור של הקובץ שאתה רוצה לשמור -->
-          FILE_URL: https://www.prog.co.il/attachments/0-jpg.2267045/
+          FILE_URL: https://ahblicklive.com/new_ded_video/26/23/VnOMPDVrju0PTSBRnvz/NNHEEG/480.mp4
           # שם הקובץ בתיקיית Drive (ניתן לשנות)
-          DEST_PATH: gdrive:MyUploads/תמונה
+          DEST_PATH: gdrive:MyUploads/סרטון
         run: |
           set -e
           echo "🟢 Trying rclone copyurl …"
