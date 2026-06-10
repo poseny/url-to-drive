@@ -1,6 +1,6 @@
-name: Upload URL → Google Drive (ZIP built with Python)
+name: Upload URL → Google Drive (real ZIP, any size)
 
-# מאפשר שליחה ידנית של קובץ כל‑גודל ובשם מבוקש
+# מאפשר ריצה ידנית עם שלושה inputs
 on:
   workflow_dispatch:
     inputs:
@@ -22,14 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # --------------------------------------------------------------
-      # 1️⃣  התקנת rclone (zip ו‑Python כבר מותקנים)
+      # 1️⃣ התקנת rclone (zip כבר קיים במערכת Ubuntu)
       # --------------------------------------------------------------
       - name: Install rclone
         run: |
           curl https://rclone.org/install.sh | sudo bash
 
       # --------------------------------------------------------------
-      # 2️⃣  קונפיג של rclone (remote בשם gdrive)
+      # 2️⃣ כתיבת קונפיג של rclone (remote בשם gdrive)
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
@@ -44,11 +44,9 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣  חישוב שמות הקבצים
-      #   – zip_name  : שם קובץ ה‑ZIP שיישמר ב‑Drive
-      #   – internal_name : שם הקובץ הפנימי (הקובץ המקורי)
+      # 3️⃣ חישוב שמות – zip_name (ב‑Drive) + internal_name (ב‑ZIP)
       # --------------------------------------------------------------
-      - name: Determine file names
+      - name: Determine names
         id: names
         env:
           FILE_URL: ${{ github.event.inputs.url }}
@@ -57,32 +55,32 @@ jobs:
         run: |
           set -e
 
-          # ----- שם הקובץ מה‑URL (לדוגמה 480.mp4) -----
+          # 3.1 – שם הקובץ כפי שמופיע ב‑URL (לדוגמה 480.mp4)
           raw_name=$(basename "$FILE_URL")
-          raw_name=${raw_name%%\?*}                       # הורד query‑string אם קיים
+          raw_name=${raw_name%%\?*}                          # מוריד query‑string אם קיים
           decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
           echo "🔤 Decoded name from URL = $decoded_name"
 
-          # ----- שם בסיס עבור קובץ ה‑ZIP -----------------
+          # 3.2 – שם בסיס לקובץ ה‑ZIP (אם ה‑input filename ריק → משתמש בשם ללא סיומת)
           if [[ -n "$USER_NAME" ]]; then
             base_name="$USER_NAME"
           else
-            base_name="${decoded_name%.*}"                # חותך סיומת אם קיימת
+            base_name="${decoded_name%.*}"                  # מוחק סיומת קיימת
           fi
 
-          zip_name="${base_name}.zip"                     # שם קובץ ה‑ZIP ב‑Drive
-          internal_name="$decoded_name"                   # שם הקובץ הפנימי ב‑ZIP
+          zip_name="${base_name}.zip"                       # שם קובץ ה‑ZIP בתיקיית Drive
+          internal_name="$decoded_name"                     # שם הקובץ הפנימי ב‑ZIP
 
           echo "📦 ZIP name on Drive      = $zip_name"
           echo "📁 Internal name in ZIP   = $internal_name"
 
           remote_path="gdrive:${FOLDER}/${zip_name}"
-          echo "zip_name=$zip_name"          >> $GITHUB_OUTPUT
+          echo "zip_name=$zip_name"        >> $GITHUB_OUTPUT
           echo "internal_name=$internal_name" >> $GITHUB_OUTPUT
-          echo "remote_path=$remote_path"    >> $GITHUB_OUTPUT
+          echo "remote_path=$remote_path"  >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 4️⃣  (אופציונלי) מחיקת קובץ קיים באותו שם
+      # 4️⃣ מחיקת קובץ קיים (אם קיים) – כך שלא נשארים גרסאות ישנות
       # --------------------------------------------------------------
       - name: Delete previous ZIP (if any)
         env:
@@ -96,48 +94,29 @@ jobs:
           fi
 
       # --------------------------------------------------------------
-      # 5️⃣  הורדה → יצירת ZIP ב‑Python (ב‑memory) → העלאה ל‑Drive
+      # 5️⃣ ההמרה האמיתית – download → zip (with internal name) → upload
       # --------------------------------------------------------------
-      - name: Download → Python zip (stream) → upload
+      - name: Download → zip (preserve internal name) → upload
         env:
           FILE_URL: ${{ github.event.inputs.url }}
           INTERNAL_NAME: ${{ steps.names.outputs.internal_name }}
           DEST_PATH: ${{ steps.names.outputs.remote_path }}
         run: |
           set -e
-          set -o pipefail          # אם שלב אחד נכשל – נצא ונדווח כ‑failure
+          set -o pipefail               # אם שלב במעבר נכשל – נכשל ה‑job
 
           echo "🚀 Starting transfer"
           echo "URL            = $FILE_URL"
           echo "Internal name  = $INTERNAL_NAME"
           echo "Destination    = $DEST_PATH"
 
-          # --------------------------------------------------------------
-          #   Python‑one‑liner שמייצר ZIP ב‑memory
-          # --------------------------------------------------------------
+          # ----------------‑הפעלה--------------------
+          #   wget   → קורא את הקובץ מה‑URL
+          #   zip    → יוצר ZIP ב‑stdout,
+          #            -:"$INTERNAL_NAME" מציין שם הפנימי,
+          #            - (ה‑argument האחרון) הוא קובץ קלט מ‑stdin
+          #   rclone → מעביר את ה‑ZIP הישר ל‑Google Drive.
+          # -------------------------------------------------
           wget -q -O - "$FILE_URL" \
-            | python3 - <<'PY'
-import os
-import sys
-import io
-import zipfile
-
-# שם הקובץ הפנימי נלקח מה‑Environment Variable שה‑GitHub Action שלף
-internal_name = os.getenv('INTERNAL_NAME')
-if not internal_name:
-    sys.exit('INTERNAL_NAME env var not set')
-
-# קריאת כל הקובץ מה‑stdin (זהו ה‑stream של wget)
-data = sys.stdin.buffer.read()
-
-# בנייה של קובץ ZIP במשתנה BytesIO (זיכרון בלבד)
-buf = io.BytesIO()
-with zipfile.ZipFile(buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
-    # ה‑ZipInfo מאפשר להגדיר תאריך/זמן קבוע (לא מחייב) – כאן נשתמש ב‑default
-    zf.writestr(internal_name, data)
-
-# כתיבה של קובץ ה‑ZIP ל‑stdout (רק הבייטים של ה‑archive)
-sys.stdout.buffer.write(buf.getvalue())
-PY
-            # קביעת שם קובץ ה‑ZIP ב‑Google Drive על‑ידי rclone
+            | zip -q - -:"$INTERNAL_NAME" - \
             | rclone rcat "$DEST_PATH" --progress
