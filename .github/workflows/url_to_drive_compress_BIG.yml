@@ -8,7 +8,7 @@ on:
         required: true
         default: "https://upload.wikimedia.org/wikipedia/commons/d/d6/Her_First_Kiss_%281919%29.webm"
       folder:
-        description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
+        description: "תיקיית יעד ב‑Drive"
         required: true
         default: "MyUploads"
       filename:
@@ -20,16 +20,16 @@ jobs:
   upload:
     runs-on: ubuntu-latest
     steps:
-      # ----------------------------------------------
-      # 1️⃣  התקנת rclone (zip כבר קיים)
-      # ----------------------------------------------
+      # --------------------------------------------------------------
+      # 1️⃣ התקנת rclone (zip כבר קיים במערכת)
+      # --------------------------------------------------------------
       - name: Install rclone
         run: |
           curl https://rclone.org/install.sh | sudo bash
 
-      # ----------------------------------------------
-      # 2️⃣  כתיבת קונפיג של rclone
-      # ----------------------------------------------
+      # --------------------------------------------------------------
+      # 2️⃣ קונפיג של rclone
+      # --------------------------------------------------------------
       - name: Write rclone config
         env:
           RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
@@ -42,9 +42,9 @@ jobs:
           token = $RCLONE_GDRIVE_TOKEN
           EOF
 
-      # ----------------------------------------------
-      # 3️⃣  חישוב שם הקובץ – שם ZIP ושם פנימי בתוכו
-      # ----------------------------------------------
+      # --------------------------------------------------------------
+      # 3️⃣ בניית שמות – שם ZIP בשם משתמש, שם פנימי עם שם המקורי
+      # --------------------------------------------------------------
       - name: Determine file names
         id: names
         env:
@@ -54,50 +54,47 @@ jobs:
         run: |
           set -e
 
-          # ----- 3.1 – שם הקובץ מה‑URL (לדוגמה 480.mp4) -----
+          # ----- 3.1 – שם הקובץ שמופיע ב‑URL (לדוגמה 480.mp4) -----
           raw_name=$(basename "$FILE_URL")
-          raw_name=${raw_name%%\?*}          # מדלג על query‑string אם קיים
+          raw_name=${raw_name%%\?*}                         # חתך query‑string
           decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
           echo "🔤 Decoded name from URL = $decoded_name"
 
-          # ----- 3.2 – שם בסיס ללא סיומת (להשתמש בשם ZIP) -----
+          # ----- 3.2 – שם בסיס לתיקייה של ZIP ------------------
           if [[ -n "$USER_NAME" ]]; then
             base_name="$USER_NAME"
           else
-            base_name="${decoded_name%.*}"    # מוחק סיומת קיימת (mp4, webm,…)
+            base_name="${decoded_name%.*}"                # מסיר סיומת אם יש
           fi
 
-          # שם הקובץ של ה‑ZIP שייווצר ב‑Drive
-          zip_name="${base_name}.zip"
-          # שם הקובץ הפנימי ב‑ZIP – נשמר בדיוק כמו שה‑URL מציג
-          internal_name="$decoded_name"
+          zip_name="${base_name}.zip"                      # שם קובץ ה‑ZIP ב‑Drive
+          internal_name="$decoded_name"                    # שם קובץ פנימי ב‑ZIP
 
-          echo "📦 ZIP name on Drive      = $zip_name"
+          echo "📦 ZIP file on Drive      = $zip_name"
           echo "📁 Internal name in ZIP   = $internal_name"
 
           remote_path="gdrive:${FOLDER}/${zip_name}"
-
           echo "zip_name=$zip_name"          >> $GITHUB_OUTPUT
           echo "internal_name=$internal_name" >> $GITHUB_OUTPUT
           echo "remote_path=$remote_path"    >> $GITHUB_OUTPUT
 
-      # ----------------------------------------------
-      # 4️⃣  מחיקת קובץ קיים באותו שם (אם קיים)
-      # ----------------------------------------------
-      - name: Delete old ZIP (if any)
+      # --------------------------------------------------------------
+      # 4️⃣ מחיקת קובץ קיים באותו שם (אם קיים)
+      # --------------------------------------------------------------
+      - name: Delete previous ZIP (if any)
         env:
           REMOTE_PATH: ${{ steps.names.outputs.remote_path }}
         run: |
           if rclone lsf "$REMOTE_PATH" > /dev/null 2>&1; then
-            echo "🗑️ Deleting previous $REMOTE_PATH"
+            echo "🗑️ Deleting old $REMOTE_PATH"
             rclone delete "$REMOTE_PATH"
           else
             echo "✅ No previous file to delete"
           fi
 
-      # ----------------------------------------------
-      # 5️⃣  הורדה → zip (עם שם פנימי) → העלאה ל‑Drive
-      # ----------------------------------------------
+      # --------------------------------------------------------------
+      # 5️⃣ Download → zip (preserve internal name) → upload
+      # --------------------------------------------------------------
       - name: Download → zip (preserve internal name) → upload
         env:
           FILE_URL: ${{ github.event.inputs.url }}
@@ -105,16 +102,23 @@ jobs:
           DEST_PATH: ${{ steps.names.outputs.remote_path }}
         run: |
           set -e
-          echo "🚀 Transfer start"
+          set -o pipefail     # אם אחד הצינורות נכשל – נסגרים
+
+          echo "🚀 Starting transfer"
           echo "URL            = $FILE_URL"
           echo "Internal name  = $INTERNAL_NAME"
           echo "Destination    = $DEST_PATH"
 
-          # שימוש ב‑zip בצורה שמסמנת במפורש את שם הקובץ הפנימי:
-          #   -q        : silent
-          #   -         : שם קובץ ZIP יכתב ל‑stdout (pipeline)
-          #   -:$INTERNAL_NAME : אומר ל‑zip ששמו של הקובץ שיקרא מ‑stdin הוא $INTERNAL_NAME
-          #   -         : הקובץ שה‑zip קורא הוא STDIN עצמו
+          # ========= משמעות הפקודה =========
+          #   wget …                      → קורא את הקובץ מה‑URL.
+          #   zip -q - "-:${INTERNAL_NAME}" -   → 
+          #        •  zip‑file   = -      (stdout → pipe)
+          #        •  entry‑name = ${INTERNAL_NAME}   (ה‑-: מציין שם קובץ פנימי)
+          #        •  מקור       = -      (קורא את המידע מ‑stdin)
+          #   rclone rcat …               → מזרים את ה‑ZIP ל‑Google Drive.
+          #
+          # חשוב: שם הקובץ הפנימי מועבר ב‑ציטוטים כפולים כדי
+          #        לשמור על רווחים, סוגריים ו‑Unicode.
           wget -q -O - "$FILE_URL" \
-            | zip -q - -:"$INTERNAL_NAME" - \
+            | zip -q - "-:${INTERNAL_NAME}" - \
             | rclone rcat "$DEST_PATH" --progress
