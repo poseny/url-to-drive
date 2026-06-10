@@ -1,0 +1,158 @@
+name: Download YouTube → Google Drive (ZIP / TGZ)
+
+# מאפשר הרצה ידנית עם קישור של YouTube, תצורת דחיסה ותיקיית יעד ב‑Drive
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: "קישור מלא של סרטון YouTube (לדוגמה https://www.youtube.com/watch?v=ABC123)"
+        required: true
+        default: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+      compress:
+        description: "סוג דחיסה – none | zip | tgz"
+        required: true
+        default: "zip"
+      folder:
+        description: "תיקיית יעד ב‑Drive (ללא שם קובץ). לדוגמה: MyYouTube"
+        required: true
+        default: "MyYouTube"
+      # אם אתה רוצה שינוי שם הקובץ לפני ה‑ZIP (לא חובה)
+      filename:
+        description: "שם קובץ (ללא סיומת) – אם ריק, ייקח את שם הסרטון מה‑YouTube"
+        required: false
+        default: ""
+
+jobs:
+  download_and_upload:
+    runs-on: ubuntu-latest
+    steps:
+      # --------------------------------------------------------------
+      # 1️⃣  התקנת rclone + yt‑dlp (להורדת YouTube)
+      # --------------------------------------------------------------
+      - name: Install rclone and yt-dlp
+        run: |
+          # rclone
+          curl https://rclone.org/install.sh | sudo bash
+          # yt-dlp – העלאת גרסה עדכנית מה‑GitHub releases
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-pip
+          python3 -m pip install --quiet yt-dlp
+
+      # --------------------------------------------------------------
+      # 2️⃣  קונפיג של rclone (remote בשם gdrive)
+      # --------------------------------------------------------------
+      - name: Write rclone config
+        env:
+          RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive.file
+          token = $RCLONE_GDRIVE_TOKEN
+          EOF
+
+      # --------------------------------------------------------------
+      # 3️⃣  קביעת שם קובץ (שם קובץ חיצוני + שם קובץ פנימי ב‑ZIP)
+      # --------------------------------------------------------------
+      - name: Determine final names
+        id: name_builder
+        env:
+          YOUTUBE_URL: ${{ github.event.inputs.youtube_url }}
+          USER_NAME: ${{ github.event.inputs.filename }}
+          COMPRESS: ${{ github.event.inputs.compress }}
+          FOLDER: ${{ github.event.inputs.folder }}
+        run: |
+          set -e
+
+          # ---------- 3.1 – קבלת שם קובץ "ידידותי" מה‑YouTube ----------
+          # –‑get‑filename מחזיר שם קובץ לפי תבנית; נשתמש בתבנית "%(title)s.%(ext)s"
+          raw_name=$(yt-dlp --get-filename -o "%(title)s.%(ext)s" "$YOUTUBE_URL")
+          echo "📦 Raw name from YouTube = $raw_name"
+
+          # אם המשתמש נתן שם קובץ ידני – נשתמש בו במקום
+          if [[ -n "$USER_NAME" ]]; then
+            base_name="$USER_NAME"
+            # שמירת סיומת המקור (mp4, webm, mkv …) מה‑raw_name
+            original_ext="${raw_name##*.}"
+            internal_name="${base_name}.${original_ext}"
+          else
+            # אין שם ידני – נשתמש בשם שמחזיר yt‑dlp (כולל סיומת)
+            base_name="${raw_name%.*}"
+            internal_name="$raw_name"
+          fi
+
+          # ---------- 3.2 – ה‑ZIP/​TGZ name ----------
+          case "$COMPRESS" in
+            none)   zip_name="${internal_name}"               ;;   # אין שינוי, נשמור קובץ רגיל
+            zip)    zip_name="${base_name}.zip"               ;;
+            tgz)    zip_name="${base_name}.tgz"               ;;
+            *)      echo "❌ Unknown compress option" && exit 1 ;;
+          esac
+
+          echo "🔖 Internal name (inside archive) = $internal_name"
+          echo "📦 Archive name that will be stored in Drive = $zip_name"
+
+          remote_path="gdrive:${FOLDER}/${zip_name}"
+          echo "remote_path=$remote_path" >> $GITHUB_OUTPUT
+          echo "internal_name=$internal_name" >> $GITHUB_OUTPUT
+          echo "zip_name=$zip_name" >> $GITHUB_OUTPUT
+
+      # --------------------------------------------------------------
+      # 4️⃣  (אופציונלי) מחיקת קובץ קיים באותו שם לפני העלאה
+      # --------------------------------------------------------------
+      - name: Delete previous file (if any)
+        env:
+          REMOTE_PATH: ${{ steps.name_builder.outputs.remote_path }}
+        run: |
+          if rclone lsf "$REMOTE_PATH" > /dev/null 2>&1; then
+            echo "🗑️ Deleting old $REMOTE_PATH"
+            rclone delete "$REMOTE_PATH"
+          else
+            echo "✅ No previous file found"
+          fi
+
+      # --------------------------------------------------------------
+      # 5️⃣  הורדה → (דחיסה אם נדרש) → העלאה ל‑Drive
+      # --------------------------------------------------------------
+      - name: Transfer YouTube video → (optional compress) → upload
+        env:
+          YOUTUBE_URL: ${{ github.event.inputs.youtube_url }}
+          COMPRESS: ${{ github.event.inputs.compress }}
+          INTERNAL_NAME: ${{ steps.name_builder.outputs.internal_name }}
+          DEST_PATH: ${{ steps.name_builder.outputs.remote_path }}
+        run: |
+          set -e
+          echo "🔎 INPUTS"
+          echo "YouTube URL   = $YOUTUBE_URL"
+          echo "Compress mode = $COMPRESS"
+          echo "Internal name = $INTERNAL_NAME"
+          echo "Dest path     = $DEST_PATH"
+
+          # ---------- ללא דחיסה (קובץ רגיל) ----------
+          if [[ "$COMPRESS" == "none" ]]; then
+            # yt‑dlp -f best -o -   → פלט ל‑stdout
+            yt-dlp -f best -o - "$YOUTUBE_URL" | rclone rcat "$DEST_PATH" --progress
+            exit 0
+          fi
+
+          # ---------- ZIP ----------
+          if [[ "$COMPRESS" == "zip" ]]; then
+            # yt‑dlp → stdout → zip (שם פנימי = INTERNAL_NAME) → rclone
+            yt-dlp -f best -o - "$YOUTUBE_URL" | zip -q - "$INTERNAL_NAME" - | rclone rcat "$DEST_PATH" --progress
+            exit 0
+          fi
+
+          # ---------- TGZ ----------
+          if [[ "$COMPRESS" == "tgz" ]]; then
+            # tar‑czf יוצר tgz, שומר על שם הקובץ הפנימי (שנקבל ב‑INTERNAL_NAME)
+            # השתמש ב‑--transform כדי לשנות את שם הקובץ שבתוך ה‑archive ל‑INTERNAL_NAME
+            yt-dlp -f best -o - "$YOUTUBE_URL" | \
+              tar --transform="s|.*|$INTERNAL_NAME|" -czf - - | \
+              rclone rcat "$DEST_PATH" --progress
+            exit 0
+          fi
+
+          echo "❌ Should never reach here"
+          exit 1
