@@ -1,6 +1,6 @@
-name: Upload URL → Google Drive (ZIP – keep original inner name)
+name: Upload URL → Google Drive (ZIP – custom inner name)
 
-# מאפשר הרצה ידנית עם שלושה פרמטרים
+# הפעלה ידנית עם ארבעה קלטים
 on:
   workflow_dispatch:
     inputs:
@@ -9,11 +9,15 @@ on:
         required: true
         default: "https://ahblicklive.com/new_ded_video/26/23/VnOMPDVrju0PTSBRnvz/NNHEEG/480.mp4"
       folder:
-        description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
+        description: "שם תיקיית יעד ב‑Drive (ללא שם קובץ)"
         required: true
         default: "MyUploads"
       filename:
-        description: "שם קובץ **ל‑ZIP** (ללא סיומת). אם ריק – משתמשים בשם הקובץ מה‑URL."
+        description: "שם קובץ ZIP (ללא סיומת). אם ריק – ייקח את שם הקובץ מה‑URL."
+        required: false
+        default: ""
+      inner_name:
+        description: "שם הקובץ הפנימי בארכיון (כולל סיומת). אם ריק – ישתמש בשם הקובץ מה‑URL."
         required: false
         default: ""
 
@@ -22,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # --------------------------------------------------------------
-      # 1️⃣  התקנת rclone (zip כבר קיים ב‑Ubuntu)
+      # 1️⃣  התקנת rclone (zip כבר מותקן ב‑Ubuntu)
       # --------------------------------------------------------------
       - name: Install rclone
         run: |
@@ -44,78 +48,39 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣  בניית שמות הקבצים (ZIP ו‑שם פנימי)
+      # 3️⃣  קביעת שמות (ZIP, שם פנימי, נתיב דרייב)
       # --------------------------------------------------------------
       - name: Determine final names
         id: names
         env:
           FILE_URL: ${{ github.event.inputs.url }}
           USER_ZIPNAME: ${{ github.event.inputs.filename }}
+          USER_INNERNAME: ${{ github.event.inputs.inner_name }}
           FOLDER: ${{ github.event.inputs.folder }}
         run: |
           set -e
 
           # ---- 3.1 – שם הקובץ שמופיע ב‑URL (למשל 480.mp4) ----
           raw_name=$(basename "$FILE_URL")
-          raw_name=${raw_name%%\?*}                     # מסיר כל "?query" אם קיים
+          raw_name=${raw_name%%\?*}                     # מסיר query‑string אם קיים
           decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
           echo "🔤 Decoded name from URL = $decoded_name"
 
-          # ---- 3.2 – שם קובץ ה‑ZIP עצמו ----
+          # ---- 3.2 – שם קובץ ה‑ZIP עצמו (ב‑Drive) ----
           if [[ -n "$USER_ZIPNAME" ]]; then
             zip_base="$USER_ZIPNAME"
           else
-            # אם אין שם מותאם – משאירים רק את החלק לפני הסיומת
-            zip_base="${decoded_name%.*}"
+            zip_base="${decoded_name%.*}"   # ללא סיומת
           fi
           zip_name="${zip_base}.zip"
-          echo "📦 ZIP file name that will be stored on Drive = $zip_name"
+          echo "📦 ZIP file name on Drive = $zip_name"
 
-          # ---- 3.3 – שם קובץ פנימי בתוך ה‑ZIP ----------
-          internal_name="$decoded_name"   # כולל סיומת מקורית
-          echo "📁 Internal name inside ZIP = $internal_name"
-
-          # ---- 3.4 – נתיב מלא ב‑Drive -------------------
-          remote_path="gdrive:${FOLDER}/${zip_name}"
-
-          # שמירת ערכים לשימוש בשלבים הבאים
-          echo "zip_name=$zip_name" >> $GITHUB_OUTPUT
-          echo "internal_name=$internal_name" >> $GITHUB_OUTPUT
-          echo "remote_path=$remote_path" >> $GITHUB_OUTPUT
-
-      # --------------------------------------------------------------
-      # 4️⃣  (אופציונלי) מחיקת ZIP קיים באותו שם לפני העלאה
-      # --------------------------------------------------------------
-      - name: Delete existing ZIP (if any)
-        env:
-          REMOTE_PATH: ${{ steps.names.outputs.remote_path }}
-        run: |
-          if rclone lsf "$REMOTE_PATH" > /dev/null 2>&1; then
-            echo "🗑️ Deleting old $REMOTE_PATH"
-            rclone delete "$REMOTE_PATH"
+          # ---- 3.3 – שם פנימי בתוך ה‑ZIP ----------
+          if [[ -n "$USER_INNERNAME" ]]; then
+            internal_name="$USER_INNERNAME"
           else
-            echo "✅ No previous ZIP found"
+            internal_name="$decoded_name"
           fi
+          echo "📁 Internal file name inside ZIP = $internal_name"
 
-      # --------------------------------------------------------------
-      # 5️⃣  הורדה → ZIP (עם שם פנימי) → העלאה ל‑Drive
-      # --------------------------------------------------------------
-      - name: Transfer (download → zip → upload)
-        env:
-          FILE_URL: ${{ github.event.inputs.url }}
-          INTERNAL_NAME: ${{ steps.names.outputs.internal_name }}
-          DEST_PATH: ${{ steps.names.outputs.remote_path }}
-        run: |
-          set -e
-          echo "🚀 Starting transfer"
-          echo "URL            = $FILE_URL"
-          echo "Internal name  = $INTERNAL_NAME"
-          echo "Destination    = $DEST_PATH"
-
-          # הפקודה החשובה – zip עם שם פנימי שמוגדר במפורש
-          #   -   → zipfile = stdout (נתון ל‑rclone)
-          #   "$INTERNAL_NAME" → שם הקובץ שבתוך ה‑ZIP
-          #   -   → המקור הוא stdin (ה‑stream שמקבל wget)
-          wget -q -O - "$FILE_URL" | \
-            zip -q - "$INTERNAL_NAME" - | \
-            rclone rcat "$DEST_PATH" --progress
+          # ---- 3.4 – נתיב מלא ב
