@@ -1,4 +1,4 @@
-name: Debug Simple
+name: Debug No Upload
 
 on:
   workflow_dispatch:
@@ -8,10 +8,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Install and test
+      - name: Install all
         run: |
-          echo "AAA - Starting"
-          pip3 install yt-dlp 2>&1
-          echo "BBB - Install done"
-          yt-dlp --version 2>&1
-          echo "CCC - Version shown"
+          echo "=== Installing ==="
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl zip ffmpeg
+          pip3 install --upgrade yt-dlp
+          curl -s https://rclone.org/install.sh | sudo bash
+          echo "=== All installed ==="
+          yt-dlp --version
+          rclone version
+
+      - name: Download YouTube
+        run: |
+          echo "=== Downloading ==="
+          mkdir -p /tmp/test
+          cd /tmp/test
+          yt-dlp --no-playlist -f "bestaudio" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1
+          echo "=== Download done ==="
+          ls -la /tmp/test/
+
+      - name: Create ZIP
+        run: |
+          echo "=== Creating ZIP ==="
+          cd /tmp/test
+          zip -j test.zip test.*
+          echo "=== ZIP created ==="
+          ls -la /tmp/test/
