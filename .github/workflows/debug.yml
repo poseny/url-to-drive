@@ -1,4 +1,4 @@
-name: Debug Update README
+name: Debug Force Push
 
 on:
   workflow_dispatch:
@@ -10,6 +10,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install yt-dlp
         run: pip3 install --upgrade yt-dlp
@@ -19,17 +21,19 @@ jobs:
           mkdir -p /tmp/test
           cd /tmp/test
           yt-dlp --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
-          echo "=== UPDATING README ==="
+          
           echo "# YouTube Debug Log" > README.md
           echo "" >> README.md
-          echo "\`\`\`" >> README.md
+          echo "Generated: $(date)" >> README.md
+          echo "" >> README.md
+          echo '```' >> README.md
           cat /tmp/log.txt >> README.md
-          echo "\`\`\`" >> README.md
+          echo '```' >> README.md
 
-      - name: Commit README
+      - name: Force commit and push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add README.md
-          git commit -m "Update README with youtube log" || echo "No changes"
-          git push || echo "Push failed"
+          git commit -m "Update README with youtube log" --allow-empty
+          git push --force
