@@ -1,4 +1,4 @@
-name: Debug Minimal
+name: Debug Simple
 
 on:
   workflow_dispatch:
@@ -6,10 +6,12 @@ on:
 jobs:
   debug:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Just install and test
+      - name: Install and test
         run: |
-          pip3 install yt-dlp
-          yt-dlp --version
-          yt-dlp -v "https://www.youtube.com/watch?v=I60j6jur_TY" --print "%(title)s" 2>&1
+          echo "AAA - Starting"
+          pip3 install yt-dlp 2>&1
+          echo "BBB - Install done"
+          yt-dlp --version 2>&1
+          echo "CCC - Version shown"
