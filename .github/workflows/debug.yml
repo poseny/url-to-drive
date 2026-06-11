@@ -1,4 +1,4 @@
-name: Debug With Cookies
+name: Debug Other Video
 
 on:
   workflow_dispatch:
@@ -8,23 +8,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
       - name: Install yt-dlp
         run: pip3 install --upgrade yt-dlp
 
-      - name: Download with cookies
+      - name: Download other video
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
-          yt-dlp --cookies www.youtube.com_cookies.txt --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
+          yt-dlp --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=dQw4w9WgXcQ" 2>&1 | tee /tmp/log.txt
           
           echo "=== EXIT CODE: $? ==="
-          echo "=== FILES DOWNLOADED ==="
-          ls -la /tmp/test/
 
-      - name: Send email with log
+      - name: Send email
         env:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         run: |
@@ -40,19 +35,17 @@ jobs:
           msg = MIMEMultipart()
           msg['From'] = 'p0556722432@gmail.com'
           msg['To'] = 'p0556722432@gmail.com'
-          msg['Subject'] = 'YouTube Debug Log with Cookies'
+          msg['Subject'] = 'YouTube Debug Log - Other Video'
 
-          body = f"Here is the YouTube debug log:\n\n{log_content}"
-          msg.attach(MIMEText(body, 'plain'))
+          msg.attach(MIMEText(log_content, 'plain'))
 
           try:
               server = smtplib.SMTP('smtp.gmail.com', 587)
               server.starttls()
               server.login('p0556722432@gmail.com', os.environ['EMAIL_PASSWORD'])
-              text = msg.as_string()
-              server.sendmail('p0556722432@gmail.com', 'p0556722432@gmail.com', text)
+              server.sendmail('p0556722432@gmail.com', 'p0556722432@gmail.com', msg.as_string())
               server.quit()
-              print("=== EMAIL SENT SUCCESSFULLY ===")
+              print("EMAIL SENT")
           except Exception as e:
-              print(f"=== EMAIL FAILED: {e} ==>")
+              print(f"EMAIL FAILED: {e}")
           EOF
