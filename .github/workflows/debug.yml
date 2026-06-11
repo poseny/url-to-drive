@@ -1,4 +1,4 @@
-name: Debug No Upload
+name: Debug with cookies
 
 on:
   workflow_dispatch:
@@ -8,30 +8,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Install all
+      - name: Install yt-dlp
         run: |
-          echo "=== Installing ==="
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq curl zip ffmpeg
           pip3 install --upgrade yt-dlp
-          curl -s https://rclone.org/install.sh | sudo bash
-          echo "=== All installed ==="
-          yt-dlp --version
-          rclone version
 
-      - name: Download YouTube
+      - name: Download with user agent
         run: |
-          echo "=== Downloading ==="
           mkdir -p /tmp/test
           cd /tmp/test
-          yt-dlp --no-playlist -f "bestaudio" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1
-          echo "=== Download done ==="
-          ls -la /tmp/test/
-
-      - name: Create ZIP
-        run: |
-          echo "=== Creating ZIP ==="
-          cd /tmp/test
-          zip -j test.zip test.*
-          echo "=== ZIP created ==="
+          
+          yt-dlp \
+            --verbose \
+            --no-playlist \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            -f "bestaudio/best" \
+            -o "test.%(ext)s" \
+            "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1
+          
+          echo "=== Done ==="
           ls -la /tmp/test/
