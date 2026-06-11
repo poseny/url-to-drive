@@ -1,4 +1,4 @@
-name: Debug Simple Status
+name: Debug Super Simple
 
 on:
   workflow_dispatch:
@@ -15,14 +15,7 @@ jobs:
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
-          
-          echo "=== STARTING DOWNLOAD ==="
-          
-          if yt-dlp --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>/tmp/error.txt; then
-            echo "STATUS: SUCCESS"
-            ls -la /tmp/test/
-          else
-            echo "STATUS: FAILED"
-            echo "=== ERROR LOG ==="
-            cat /tmp/error.txt
-          fi
+          yt-dlp --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY"
+          echo "DOWNLOAD EXIT CODE: $?"
+          echo "FILES:"
+          ls -la /tmp/test/
