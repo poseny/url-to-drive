@@ -1,4 +1,4 @@
-name: Debug Super Simple
+name: Debug Email Log
 
 on:
   workflow_dispatch:
@@ -11,11 +11,43 @@ jobs:
       - name: Install yt-dlp
         run: pip3 install --upgrade yt-dlp
 
-      - name: Download YouTube
+      - name: Download and send email
+        env:
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
-          yt-dlp --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY"
-          echo "DOWNLOAD EXIT CODE: $?"
-          echo "FILES:"
-          ls -la /tmp/test/
+          yt-dlp --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
+          
+          echo "=== SENDING EMAIL ==="
+          python3 << 'EOF'
+          import smtplib
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+          import os
+
+          # Read log
+          with open('/tmp/log.txt', 'r') as f:
+              log_content = f.read()
+
+          # Create message
+          msg = MIMEMultipart()
+          msg['From'] = 'p0556722432@gmail.com'
+          msg['To'] = 'p0556722432@gmail.com'
+          msg['Subject'] = 'YouTube Debug Log from GitHub Actions'
+
+          body = f"Here is the YouTube debug log:\n\n{log_content}"
+          msg.attach(MIMEText(body, 'plain'))
+
+          # Send email
+          try:
+              server = smtplib.SMTP('smtp.gmail.com', 587)
+              server.starttls()
+              server.login('p0556722432@gmail.com', os.environ['EMAIL_PASSWORD'])
+              text = msg.as_string()
+              server.sendmail('p0556722432@gmail.com', 'p0556722432@gmail.com', text)
+              server.quit()
+              print("=== EMAIL SENT SUCCESSFULLY ===")
+          except Exception as e:
+              print(f"=== EMAIL FAILED: {e} ==>")
+          EOF
