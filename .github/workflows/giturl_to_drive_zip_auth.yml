@@ -1,40 +1,28 @@
-name: Upload URL → Google Drive (ZIP, עם אימות)
+name: Upload URL → Google Drive (ZIP, auth‑aware)
 
+# אפשרות להריץ ידנית עם שלושה inputs
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "כתובת URL של הקובץ (אפשר גם קישורים פרטיים)"
+        description: "כתובת URL של הקובץ (אם זה GitHub private, הוא ייטען עם PAT)"
         required: true
-        default: "https://example.com/protected/file.mp4"
+        default: "https://github.com/poseny/url-to-drive/raw/main/README.md"
       folder:
         description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
         required: true
         default: "MyUploads"
       filename:
-        description: "שם קובץ לפני .zip (אם ריק – נלקח מה‑URL)"
+        description: "שם קובץ לפני .zip (אם ריק – ייקח משם הקובץ ב‑URL)"
         required: false
         default: ""
-      auth_method:
-        description: "שיטת אימות – none | token | basic | session"
-        required: true
-        default: "none"
 
 jobs:
   upload:
     runs-on: ubuntu-latest
     steps:
       # --------------------------------------------------------------
-      # 0️⃣  הגדרת סודות (הסוד של GitHub PAT הוא AGITHUB_PAT)
-      # --------------------------------------------------------------
-      #   • RCLONE_GDRIVE_TOKEN – טוקן של Google Drive (כפי שהיה קודם)
-      #   • AGITHUB_PAT         – Personal Access Token של GitHub
-      #   • AUTH_USER, AUTH_PASS – למצב Basic Auth (אם תצטרך)
-      #   • LOGIN_URL, USERNAME, PASSWORD, LOGIN_FORM_FIELDS – למצב Session
-      # --------------------------------------------------------------
-
-      # --------------------------------------------------------------
-      # 1️⃣  התקנת rclone (zip, curl כבר במערכת)
+      # 1️⃣  התקנת rclone (zip, curl, jq כבר במערכת)
       # --------------------------------------------------------------
       - name: Install rclone
         run: |
@@ -56,7 +44,7 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣  חישוב שמות הקבצים (ZIP name + internal name)
+      # 3️⃣  חישוב שמות – zip_name (ב‑Drive) + internal_name (ב‑ZIP)
       # --------------------------------------------------------------
       - name: Determine names
         id: names
@@ -65,23 +53,33 @@ jobs:
           USER_NAME: ${{ github.event.inputs.filename }}
         run: |
           set -e
+
+          # 3.1 – שם הקובץ מה‑URL (לדוגמה README.md)
           raw_name=$(basename "$FILE_URL")
           raw_name=${raw_name%%\?*}
           decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
+          echo "🔤 Decoded name from URL = $decoded_name"
+
+          # 3.2 – שם בסיס ל‑ZIP
           if [[ -n "$USER_NAME" ]]; then
             base_name="$USER_NAME"
           else
             base_name="${decoded_name%.*}"
           fi
+
           zip_name="${base_name}.zip"
           internal_name="$decoded_name"
-          remote_path="gdrive:${{ github.event.inputs.folder }}/$zip_name"
-          echo "zip_name=$zip_name"          >> $GITHUB_OUTPUT
+
+          echo "📦 ZIP name on Drive      = $zip_name"
+          echo "📁 Internal name in ZIP   = $internal_name"
+
+          remote_path="gdrive:${{ github.event.inputs.folder }}/${zip_name}"
+          echo "zip_name=$zip_name"        >> $GITHUB_OUTPUT
           echo "internal_name=$internal_name" >> $GITHUB_OUTPUT
-          echo "remote_path=$remote_path"    >> $GITHUB_OUTPUT
+          echo "remote_path=$remote_path"  >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 4️⃣  (אופציונלי) מחיקת קובץ קיים ב‑Drive
+      # 4️⃣  מחיקת קובץ קיים באותו שם (אם קיים)
       # --------------------------------------------------------------
       - name: Delete previous ZIP (if any)
         env:
@@ -91,71 +89,19 @@ jobs:
             echo "🗑️ Deleting old $REMOTE_PATH"
             rclone delete "$REMOTE_PATH"
           else
-            echo "✅ No previous ZIP found"
+            echo "✅ No old file to delete"
           fi
 
       # --------------------------------------------------------------
-      # 5️⃣  בניית פרמטרי curl לפי שיטת האימות
+      # 5️⃣  הורדה → zip → upload
       # --------------------------------------------------------------
-      - name: Prepare curl options for authentication
-        id: curlopts
-        env:
-          AUTH_METHOD: ${{ github.event.inputs.auth_method }}
-          # כאן משתמשים בסוד החדש שהגדרת – AGITHUB_PAT
-          AGITHUB_PAT: ${{ secrets.AGITHUB_PAT }}
-          AUTH_USER: ${{ secrets.AUTH_USER }}
-          AUTH_PASS: ${{ secrets.AUTH_PASS }}
-          LOGIN_URL: ${{ secrets.LOGIN_URL }}
-          USERNAME: ${{ secrets.USERNAME }}
-          PASSWORD: ${{ secrets.PASSWORD }}
-          LOGIN_FORM_FIELDS: ${{ secrets.LOGIN_FORM_FIELDS }}
-        run: |
-          set -e
-          CURL_OPTS="-L -s"                 # -L follow redirects, -s silent
-
-          if [[ "$AUTH_METHOD" == "token" ]]; then
-            if [[ -z "$AGITHUB_PAT" ]]; then
-              echo "❌ Secret AGITHUB_PAT is required for token auth"
-              exit 1
-            fi
-            CURL_OPTS="$CURL_OPTS -H \"Authorization: token $AGITHUB_PAT\""
-
-          elif [[ "$AUTH_METHOD" == "basic" ]]; then
-            if [[ -z "$AUTH_USER" || -z "$AUTH_PASS" ]]; then
-              echo "❌ AUTH_USER and AUTH_PASS secrets required for basic auth"
-              exit 1
-            fi
-            CURL_OPTS="$CURL_OPTS -u \"$AUTH_USER:$AUTH_PASS\""
-
-          elif [[ "$AUTH_METHOD" == "session" ]]; then
-            if [[ -z "$LOGIN_URL" || -z "$USERNAME" || -z "$PASSWORD" ]]; then
-              echo "❌ LOGIN_URL, USERNAME and PASSWORD secrets required for session auth"
-              exit 1
-            fi
-            COOKIE_JAR=$(mktemp)
-            # בנייה של POST data – אם יש JSON של שדות, משתמשים בו
-            if [[ -n "$LOGIN_FORM_FIELDS" ]]; then
-              POST_DATA=$(echo "$LOGIN_FORM_FIELDS" | \
-                jq -r 'to_entries|map("\(.key)=\(.value|tostring)")|join("&")')
-            else
-              POST_DATA="login=$USERNAME&password=$PASSWORD"
-            fi
-            echo "🔐 Performing login POST to $LOGIN_URL"
-            curl -s -c "$COOKIE_JAR" -d "$POST_DATA" "$LOGIN_URL" > /dev/null
-            CURL_OPTS="$CURL_OPTS -b \"$COOKIE_JAR\""
-          fi
-
-          echo "curl_opts=$CURL_OPTS" >> $GITHUB_OUTPUT
-
-      # --------------------------------------------------------------
-      # 6️⃣  הורדה → zip → העלאה (ה‑curl משתמש באופציות שהוכנו)
-      # --------------------------------------------------------------
-      - name: Download → zip → upload (with auth)
+      - name: Download → zip (preserve internal name) → upload
         env:
           FILE_URL: ${{ github.event.inputs.url }}
           INTERNAL_NAME: ${{ steps.names.outputs.internal_name }}
           DEST_PATH: ${{ steps.names.outputs.remote_path }}
-          CURL_OPTS: ${{ steps.curlopts.outputs.curl_opts }}
+          # PAT – נשמר כ-secret ולא נחשף בלוגים
+          GH_TOKEN: ${{ secrets.AGITHUB_PAT }}
         run: |
           set -e
           set -o pipefail
@@ -164,9 +110,35 @@ jobs:
           echo "URL            = $FILE_URL"
           echo "Internal name  = $INTERNAL_NAME"
           echo "Destination    = $DEST_PATH"
-          echo "Curl options   = $CURL_OPTS"
 
-          # השתמש ב‑eval כדי שה‑options שנבנו יתקבלו כ‑פרמטרים נפרדים ל‑curl
-          eval "curl $CURL_OPTS \"$FILE_URL\" \
-            | zip -q - -:\"$INTERNAL_NAME\" - \
-            | rclone rcat \"$DEST_PATH\" --progress"
+          # -------------------------------------------------
+          # האם ה‑URL שייך ל‑github.com ?
+          # אם כן – נשתמש ב‑curl עם Authorization header.
+          # אחרת – נשתמש ב‑wget רגיל (אין צורך ב‑token).
+          # -------------------------------------------------
+          if [[ "$FILE_URL" == https://github.com/* || "$FILE_URL" == https://raw.githubusercontent.com/* ]]; then
+            # ---------- GitHub‑specific download ----------
+            # 1️⃣ אם ה‑URL הוא כבר raw‑github (raw.githubusercontent.com) – אין צורך לשנות אותו,
+            #    רק מוסיפים את ה‑header כדי לקבל גישה לקבצים פרטיים.
+            # 2️⃣ במקרים של https://github.com/<owner>/<repo>/blob/...   – יש לנתב ל‑raw.
+            #    נבצע המרה פשוטה:
+            RAW_URL="${FILE_URL}"
+            if [[ "$RAW_URL" == *"/blob/"* ]]; then
+              RAW_URL=$(echo "$RAW_URL" | sed -e 's#github.com#raw.githubusercontent.com#' -e 's#/blob/##')
+            fi
+
+            echo "🔗 Using raw URL for GitHub: $RAW_URL"
+
+            # ---- הורדה עם token ----
+            curl -L -s -H "Authorization: token $GH_TOKEN" \
+                 -H "Accept: application/vnd.github.raw" \
+                 "$RAW_URL" \
+              | zip -q - -:"$INTERNAL_NAME" - \
+              | rclone rcat "$DEST_PATH" --progress
+
+          else
+            # ---------- כל אתר אחר ----------
+            wget -q -O - "$FILE_URL" \
+              | zip -q - -:"$INTERNAL_NAME" - \
+              | rclone rcat "$DEST_PATH" --progress
+          fi
