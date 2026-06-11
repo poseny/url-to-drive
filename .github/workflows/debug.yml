@@ -1,0 +1,22 @@
+name: Debug yt-dlp
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install yt-dlp
+        run: |
+          pip3 install --upgrade yt-dlp
+          yt-dlp --version
+
+      - name: Test yt-dlp download
+        run: |
+          mkdir -p /tmp/test
+          cd /tmp/test
+          yt-dlp --verbose --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1
+          echo "=== Files ==="
+          ls -la /tmp/test/
