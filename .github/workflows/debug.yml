@@ -1,4 +1,4 @@
-name: Debug Save Log to Repo
+name: Debug Update README
 
 on:
   workflow_dispatch:
@@ -14,18 +14,22 @@ jobs:
       - name: Install yt-dlp
         run: pip3 install --upgrade yt-dlp
 
-      - name: Download and save log
+      - name: Download and update README
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
           yt-dlp --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
-          echo "=== SAVING LOG ==="
-          cp /tmp/log.txt ${{ github.workspace }}/youtube_log.txt
+          echo "=== UPDATING README ==="
+          echo "# YouTube Debug Log" > README.md
+          echo "" >> README.md
+          echo "\`\`\`" >> README.md
+          cat /tmp/log.txt >> README.md
+          echo "\`\`\`" >> README.md
 
-      - name: Commit log to repo
+      - name: Commit README
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add youtube_log.txt
-          git commit -m "Add youtube error log" || echo "No changes"
+          git add README.md
+          git commit -m "Update README with youtube log" || echo "No changes"
           git push || echo "Push failed"
