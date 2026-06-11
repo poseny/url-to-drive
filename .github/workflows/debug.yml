@@ -1,4 +1,4 @@
-name: Debug yt-dlp
+name: Debug Step by Step
 
 on:
   workflow_dispatch:
@@ -8,15 +8,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Install yt-dlp
+      - name: Step 1 - Test yt-dlp install
         run: |
-          pip3 install --upgrade yt-dlp
+          echo "=== Installing yt-dlp ==="
+          pip3 install --upgrade yt-dlp 2>&1
+          echo "=== Check version ==="
           yt-dlp --version
+          echo "=== Step 1 DONE ==="
 
-      - name: Test yt-dlp download
+      - name: Step 2 - Test download
         run: |
+          echo "=== Starting download ==="
           mkdir -p /tmp/test
           cd /tmp/test
-          yt-dlp --verbose --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1
-          echo "=== Files ==="
+          yt-dlp -v --no-playlist -f "bestaudio" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1
+          echo "=== Download exit code: $? ==="
+          echo "=== Files in /tmp/test ==="
           ls -la /tmp/test/
+          echo "=== Step 2 DONE ==="
