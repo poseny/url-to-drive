@@ -1,4 +1,4 @@
-name: Debug with log file
+name: Debug Simple Status
 
 on:
   workflow_dispatch:
@@ -9,30 +9,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Install yt-dlp
-        run: |
-          pip3 install --upgrade yt-dlp
-          yt-dlp --version
+        run: pip3 install --upgrade yt-dlp
 
-      - name: Download YouTube and save log
+      - name: Download YouTube
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
           
-          yt-dlp \
-            --verbose \
-            --no-playlist \
-            -f "bestaudio/best" \
-            -o "test.%(ext)s" \
-            "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/download_log.txt
+          echo "=== STARTING DOWNLOAD ==="
           
-          echo "=== FILES ===" >> /tmp/download_log.txt
-          ls -la /tmp/test/ >> /tmp/download_log.txt
-          
-          echo "=== LOG SAVED ==="
-
-      - name: Upload log as artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: download-log
-          path: /tmp/download_log.txt
+          if yt-dlp --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>/tmp/error.txt; then
+            echo "STATUS: SUCCESS"
+            ls -la /tmp/test/
+          else
+            echo "STATUS: FAILED"
+            echo "=== ERROR LOG ==="
+            cat /tmp/error.txt
+          fi
