@@ -1,4 +1,4 @@
-name: Debug Other Video
+name: Debug Cookies V2
 
 on:
   workflow_dispatch:
@@ -8,14 +8,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: Install yt-dlp
         run: pip3 install --upgrade yt-dlp
 
-      - name: Download other video
+      - name: Download with cookies
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
-          yt-dlp --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=dQw4w9WgXcQ" 2>&1 | tee /tmp/log.txt
+          yt-dlp --cookies cookies_new.txt --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
           
           echo "=== EXIT CODE: $? ==="
 
@@ -35,7 +38,7 @@ jobs:
           msg = MIMEMultipart()
           msg['From'] = 'p0556722432@gmail.com'
           msg['To'] = 'p0556722432@gmail.com'
-          msg['Subject'] = 'YouTube Debug Log - Other Video'
+          msg['Subject'] = 'YouTube Debug Log V2'
 
           msg.attach(MIMEText(log_content, 'plain'))
 
