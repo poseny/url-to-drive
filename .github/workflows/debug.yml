@@ -1,4 +1,4 @@
-name: Debug Email Log
+name: Debug With Cookies
 
 on:
   workflow_dispatch:
@@ -8,38 +8,43 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: Install yt-dlp
         run: pip3 install --upgrade yt-dlp
 
-      - name: Download and send email
-        env:
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+      - name: Download with cookies
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
-          yt-dlp --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
+          yt-dlp --cookies www.youtube.com_cookies.txt --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
           
-          echo "=== SENDING EMAIL ==="
+          echo "=== EXIT CODE: $? ==="
+          echo "=== FILES DOWNLOADED ==="
+          ls -la /tmp/test/
+
+      - name: Send email with log
+        env:
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        run: |
           python3 << 'EOF'
           import smtplib
           from email.mime.text import MIMEText
           from email.mime.multipart import MIMEMultipart
           import os
 
-          # Read log
           with open('/tmp/log.txt', 'r') as f:
               log_content = f.read()
 
-          # Create message
           msg = MIMEMultipart()
           msg['From'] = 'p0556722432@gmail.com'
           msg['To'] = 'p0556722432@gmail.com'
-          msg['Subject'] = 'YouTube Debug Log from GitHub Actions'
+          msg['Subject'] = 'YouTube Debug Log with Cookies'
 
           body = f"Here is the YouTube debug log:\n\n{log_content}"
           msg.attach(MIMEText(body, 'plain'))
 
-          # Send email
           try:
               server = smtplib.SMTP('smtp.gmail.com', 587)
               server.starttls()
