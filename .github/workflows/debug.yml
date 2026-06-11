@@ -1,4 +1,4 @@
-name: Debug YouTube Alternative
+name: Debug with log file
 
 on:
   workflow_dispatch:
@@ -9,15 +9,30 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Install yt-dlp
-        run: pip3 install --upgrade yt-dlp
+        run: |
+          pip3 install --upgrade yt-dlp
+          yt-dlp --version
 
-      - name: Try different format
+      - name: Download YouTube and save log
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
           
-          echo "=== Attempt 1: worst quality ==="
-          yt-dlp --no-playlist -f "worst" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1
+          yt-dlp \
+            --verbose \
+            --no-playlist \
+            -f "bestaudio/best" \
+            -o "test.%(ext)s" \
+            "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/download_log.txt
           
-          echo "=== Files ==="
-          ls -la /tmp/test/
+          echo "=== FILES ===" >> /tmp/download_log.txt
+          ls -la /tmp/test/ >> /tmp/download_log.txt
+          
+          echo "=== LOG SAVED ==="
+
+      - name: Upload log as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-log
+          path: /tmp/download_log.txt
