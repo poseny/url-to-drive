@@ -1,287 +1,154 @@
-name: YouTube → Google Drive (download → zip/tgz → upload + logs)
+name: Upload URL → Google Drive (Zip via temporary file)
 
-# הרצה ידנית בלבד
+# מאפשר הרצה ידנית
 on:
   workflow_dispatch:
     inputs:
-      youtube_url:
-        description: "קישור של סרטון YouTube"
+      url:
+        description: "כתובת URL של הקובץ/סרטון להורדה"
         required: true
         default: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-      compress:
-        description: "סוג דחיסה – none | zip | tgz"
-        required: true
-        default: "zip"
       folder:
-        description: "תיקיית יעד ב‑Drive (למשל MyYouTube)"
+        description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
         required: true
-        default: "MyYouTube"
+        default: "MyUploads"
       filename:
-        description: "שם קובץ ללא סיומת (אופציונלי). אם ריק – ייקח את שם הסרטון מה‑YouTube"
+        description: "שם קובץ לפני .zip (אם ריק – ייקח משם הקובץ ב‑URL/YouTube)"
         required: false
         default: ""
 
 jobs:
-  download_and_upload:
+  upload:
     runs-on: ubuntu-latest
     steps:
-      # --------------------------------------------------------------
-      # 0️⃣  יצירת קובץ log כולל מידע על הריצה
-      # --------------------------------------------------------------
-      - name: Create empty log file
-        id: create_log
+      # ────────────────────────────────────────────────────────────────
+      # 1️⃣  התקנת rclone, yt-dlp, ffmpeg (הדרוש ל‑yt-dlp בכדי לשלב וידאו)
+      # ────────────────────────────────────────────────────────────────
+      - name: Install dependencies (rclone, yt-dlp, ffmpeg, zip)
         run: |
-          LOG_FILE="${{ github.workspace }}/action.log"
-          echo "=== GitHub Actions run started ===" > "$LOG_FILE"
-          echo "Run ID: ${{ github.run_id }}" >> "$LOG_FILE"
-          echo "Triggered by: ${{ github.actor }}" >> "$LOG_FILE"
-          echo "Date (UTC): $(date -u)" >> "$LOG_FILE"
-          echo "Log file path: $LOG_FILE" >> "$LOG_FILE"
-          # שומר את המיקום של קובץ הלוג במשתנה סביבה לשימוש בשלבים הבאים
-          echo "LOG_FILE=$LOG_FILE" >> $GITHUB_ENV
+          # rclone – כפי שעשית קודם
+          curl https://rclone.org/install.sh | sudo bash
+          # yt-dlp – binary ישיר
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod +x /usr/local/bin/yt-dlp
+          # ffmpeg – דרוש להמרת אודיו/וידאו של yt-dlp
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          # zip – כבר מותקן, רק למען שלמות
+          sudo apt-get install -y zip
 
-      # --------------------------------------------------------------
-      # 1️⃣  התקנת rclone, yt‑dlp, ffmpeg
-      # --------------------------------------------------------------
-      - name: Install dependencies
-        env:
-          LOG_FILE: ${{ env.LOG_FILE }}
-        run: |
-          set -e
-          {
-            echo "=== Install dependencies ==="
-            echo "Installing rclone …"
-            curl https://rclone.org/install.sh | sudo bash
-
-            echo "Installing yt‑dlp …"
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq python3-pip
-            python3 -m pip install --quiet yt-dlp
-
-            echo "Installing ffmpeg …"
-            sudo apt-get install -y -qq ffmpeg
-
-            echo "Generating locale (UTF‑8) …"
-            sudo locale-gen en_US.UTF-8
-          } 2>&1 | tee -a "$LOG_FILE"
-
-      # --------------------------------------------------------------
-      # 2️⃣  כתיבת קונפיג של rclone (remote בשם gdrive)
-      # --------------------------------------------------------------
+      # ────────────────────────────────────────────────────────────────
+      # 2️⃣  קונפיג של rclone (remote בשם gdrive)
+      # ────────────────────────────────────────────────────────────────
       - name: Write rclone config
         env:
           RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
-          LOG_FILE: ${{ env.LOG_FILE }}
         run: |
-          {
-            echo "=== Write rclone config ==="
-            mkdir -p ~/.config/rclone
-            cat > ~/.config/rclone/rclone.conf <<EOF
-            [gdrive]
-            type = drive
-            scope = drive.file
-            token = $RCLONE_GDRIVE_TOKEN
-            EOF
-            echo "rclone config written"
-          } 2>&1 | tee -a "$LOG_FILE"
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive.file
+          token = $RCLONE_GDRIVE_TOKEN
+          EOF
 
-      # --------------------------------------------------------------
-      # 3️⃣  חישוב שמות הקבצים – שם וידאו מקומי, שם ארכיון, שם ב‑Drive
-      # --------------------------------------------------------------
-      - name: Determine filenames
-        id: name_builder
+      # ────────────────────────────────────────────────────────────────
+      # 3️⃣  חשבון שמות – zip_name (ב‑Drive) ו‑original_name (ב‑ZIP)
+      # ────────────────────────────────────────────────────────────────
+      - name: Determine file names
+        id: names
         env:
-          YOUTUBE_URL: ${{ github.event.inputs.youtube_url }}
+          FILE_URL: ${{ github.event.inputs.url }}
           USER_NAME: ${{ github.event.inputs.filename }}
-          COMPRESS: ${{ github.event.inputs.compress }}
-          FOLDER: ${{ github.event.inputs.folder }}
-          LOG_FILE: ${{ env.LOG_FILE }}
-        run: |
-          set -e -x
-          {
-            echo "=== Determine filenames ==="
-            # שם ש‑yt‑dlp מציע (כולל סיומת)
-            raw_name=$(yt-dlp --get-filename -o "%(title)s.%(ext)s" "$YOUTUBE_URL")
-            echo "Raw YouTube name: $raw_name"
-
-            # שם קובץ מקומי במערכת (/tmp)
-            if [[ -n "$USER_NAME" ]]; then
-              base_name="$USER_NAME"
-              original_ext="${raw_name##*.}"
-              local_file="${base_name}.${original_ext}"
-            else
-              base_name="${raw_name%.*}"
-              local_file="$raw_name"
-            fi
-            echo "Local video filename: $local_file"
-
-            # שם קובץ ארכיון (או קובץ רגיל אם none)
-            case "$COMPRESS" in
-              none) archive_name="$local_file" ;;
-              zip)  archive_name="${base_name}.zip" ;;
-              tgz)  archive_name="${base_name}.tgz" ;;
-              *)    echo "Invalid compress option: $COMPRESS" >&2; exit 1 ;;
-            esac
-            echo "Archive name to upload: $archive_name"
-
-            # נתיבים מקומיים בתיקיית /tmp של ה‑runner
-            VIDEO_PATH="/tmp/$local_file"
-            ARCHIVE_PATH="/tmp/$archive_name"
-
-            # שמירת output ל‑GitHub
-            echo "video_path=$VIDEO_PATH"   >> $GITHUB_OUTPUT
-            echo "archive_path=$ARCHIVE_PATH" >> $GITHUB_OUTPUT
-            echo "archive_name=$archive_name" >> $GITHUB_OUTPUT
-            echo "remote_folder=gdrive:${FOLDER}" >> $GITHUB_OUTPUT
-          } 2>&1 | tee -a "$LOG_FILE"
-
-      # --------------------------------------------------------------
-      # 4️⃣  מחיקת קובץ קיים ב‑Drive (ב‑case של הרצה קודמת)
-      # --------------------------------------------------------------
-      - name: Delete previous file (if any)
-        env:
-          REMOTE_FOLDER: ${{ steps.name_builder.outputs.remote_folder }}
-          ARCHIVE_NAME: ${{ steps.name_builder.outputs.archive_name }}
-          LOG_FILE: ${{ env.LOG_FILE }}
         run: |
           set -e
-          {
-            echo "=== Delete previous file (if any) ==="
-            if rclone lsf "${REMOTE_FOLDER}/${ARCHIVE_NAME}" > /dev/null 2>&1; then
-              echo "🗑️ Deleting old ${REMOTE_FOLDER}/${ARCHIVE_NAME}"
-              rclone delete "${REMOTE_FOLDER}/${ARCHIVE_NAME}"
-            else
-              echo "✅ No previous file to delete"
-            fi
-          } 2>&1 | tee -a "$LOG_FILE"
 
-      # --------------------------------------------------------------
-      # 5️⃣  הורדת הסרטון ל‑קובץ מקומי (ה‑step כאן **אינו** עוצר את ה‑job אם נכשל)
-      # --------------------------------------------------------------
-      - name: Download video to temporary file
-        id: download
+          # 3.1 – נזהה אם מדובר ב‑YouTube (או URL ישיר)
+          if echo "$FILE_URL" | grep -iq "youtube.com\|youtu.be"; then
+            # נשתמש בשם ברירת‑מחדל של yt-dlp (תחת הכותרת)
+            base_name="${USER_NAME:-yt_video}"
+          else
+            raw_name=$(basename "$FILE_URL")
+            raw_name=${raw_name%%\?*}
+            decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
+            base_name="${USER_NAME:-${decoded_name%.*}}"
+          fi
+
+          zip_name="${base_name}.zip"
+          echo "zip_name=$zip_name" >> $GITHUB_OUTPUT
+
+          # נתיב מרוחק ב‑Drive
+          remote_path="gdrive:${{ github.event.inputs.folder }}/$zip_name"
+          echo "remote_path=$remote_path" >> $GITHUB_OUTPUT
+
+      # ────────────────────────────────────────────────────────────────
+      # 4️⃣  (אופציונלי) מחיקת קובץ קיים באותו שם על‑Drive
+      # ────────────────────────────────────────────────────────────────
+      - name: Delete old ZIP if it exists
         env:
-          YOUTUBE_URL: ${{ github.event.inputs.youtube_url }}
-          VIDEO_PATH: ${{ steps.name_builder.outputs.video_path }}
-          LOG_FILE: ${{ env.LOG_FILE }}
+          REMOTE_PATH: ${{ steps.names.outputs.remote_path }}
         run: |
-          {
-            echo "=== Download video ==="
-            # נשתמש ב‑set +e כדי שלא נעצור כאן אם yt‑dlp נכשל
-            set +e
-            yt-dlp -f best -o "$VIDEO_PATH" "$YOUTUBE_URL"
-            DL_EXIT=$?
-            echo "yt‑dlp exit code: $DL_EXIT"
-            if [[ $DL_EXIT -ne 0 ]]; then
-              echo "⚠️ yt‑dlp reported an error (code $DL_EXIT)."
-            else
-              echo "✅ Download succeeded → $(ls -lh "$VIDEO_PATH")"
-            fi
-            # נרשום את קוד השגיאה במשתנה סביבה כדי שנוכל לבדוק אותו בשלבים הבאים
-            echo "YT_DLP_EXIT=$DL_EXIT" >> $GITHUB_ENV
-            echo "downloaded_file=$VIDEO_PATH" >> $GITHUB_OUTPUT
-          } 2>&1 | tee -a "$LOG_FILE"
+          if rclone lsf "$REMOTE_PATH" > /dev/null 2>&1; then
+            echo "🗑️ Deleting previous $REMOTE_PATH"
+            rclone delete "$REMOTE_PATH"
+          else
+            echo "✅ No previous ZIP found"
+          fi
 
-      # --------------------------------------------------------------
-      # 6️⃣  יצירת ארכיון (ZIP / TGZ) או שמירה ישירה אם compress=none
-      # --------------------------------------------------------------
-      - name: Create archive (or keep raw video)
-        id: archive
+      # ────────────────────────────────────────────────────────────────
+      # 5️⃣  הורדת קובץ (YouTube או קובץ ישיר) → יצירת ZIP → העלאה ל‑Drive
+      # ────────────────────────────────────────────────────────────────
+      - name: Download → zip → upload
         env:
-          COMPRESS: ${{ github.event.inputs.compress }}
-          VIDEO_PATH: ${{ steps.name_builder.outputs.video_path }}
-          ARCHIVE_PATH: ${{ steps.name_builder.outputs.archive_path }}
-          LOG_FILE: ${{ env.LOG_FILE }}
+          FILE_URL: ${{ github.event.inputs.url }}
+          ZIP_NAME: ${{ steps.names.outputs.zip_name }}
+          DEST_PATH: ${{ steps.names.outputs.remote_path }}
         run: |
-          {
-            echo "=== Create archive ==="
-            if [[ "$COMPRESS" == "none" ]]; then
-              echo "No compression – using raw video file"
-              echo "archive_file=$VIDEO_PATH" >> $GITHUB_OUTPUT
-              exit 0
-            fi
+          set -e
+          set -o pipefail
 
-            if [[ "$COMPRESS" == "zip" ]]; then
-              echo "Creating ZIP archive …"
-              # -j : מתעלם משמות תיקיות, שומר רק את שם הקובץ עצמו בתוך ה‑ZIP
-              zip -j -q "$ARCHIVE_PATH" "$VIDEO_PATH"
-              echo "archive_file=$ARCHIVE_PATH" >> $GITHUB_OUTPUT
-              exit 0
-            fi
+          TMP_DIR=$(mktemp -d)
+          echo "📂 Working directory = $TMP_DIR"
 
-            if [[ "$COMPRESS" == "tgz" ]]; then
-              echo "Creating TGZ archive …"
-              tar -czf "$ARCHIVE_PATH" -C "$(dirname "$VIDEO_PATH")" "$(basename "$VIDEO_PATH")"
-              echo "archive_file=$ARCHIVE_PATH" >> $GITHUB_OUTPUT
-              exit 0
-            fi
+          # ---------- 5.1 הורדה ----------
+          if echo "$FILE_URL" | grep -iq "youtube.com\|youtu.be"; then
+            echo "🎬 Detected YouTube URL – using yt-dlp"
+            # -f bestvideo+bestaudio – מבקש את האיכות הטובה ביותר
+            # -o משתנה שם קובץ: שם בסיס + המקור של הקובץ (כל מה שלא צריך)
+            OUTPUT_PATH="${TMP_DIR}/downloaded_media.%(ext)s"
+            yt-dlp -f "bestvideo+bestaudio/best" -o "$OUTPUT_PATH" "$FILE_URL"
+            # מציאת שם הקובץ שה-yt-dlp יצר בפועל
+            DOWNLOADED_FILE=$(ls "${TMP_DIR}" | head -n1)
+            DOWNLOADED_FILE="${TMP_DIR}/${DOWNLOADED_FILE}"
+          else
+            echo "⬇️ Direct URL – using curl"
+            DOWNLOADED_FILE="${TMP_DIR}/downloaded_file"
+            curl -L -s -o "$DOWNLOADED_FILE" "$FILE_URL"
+          fi
 
-            echo "❌ Invalid compress option (should never happen)" >&2
+          # וידוא שהקובץ קיים ולא ריק
+          if [[ ! -s "$DOWNLOADED_FILE" ]]; then
+            echo "❌ Download failed or file is empty"
+            ls -l "$TMP_DIR"
             exit 1
-          } 2>&1 | tee -a "$LOG_FILE"
+          fi
+          echo "✅ Downloaded → $DOWNLOADED_FILE (size=$(stat -c%s "$DOWNLOADED_FILE") bytes)"
 
-      # --------------------------------------------------------------
-      # 7️⃣  העלאת הקובץ (archive או video) ל‑Google Drive
-      # --------------------------------------------------------------
-      - name: Upload to Drive
-        env:
-          REMOTE_FOLDER: ${{ steps.name_builder.outputs.remote_folder }}
-          ARCHIVE_FILE: ${{ steps.archive.outputs.archive_file }}
-          LOG_FILE: ${{ env.LOG_FILE }}
-        run: |
-          {
-            echo "=== Upload to Drive ==="
-            echo "Uploading $ARCHIVE_FILE → $REMOTE_FOLDER"
-            rclone copy "$ARCHIVE_FILE" "$REMOTE_FOLDER" --progress
-            UP_EXIT=$?
-            echo "rclone exit code: $UP_EXIT"
-            if [[ $UP_EXIT -ne 0 ]]; then
-              echo "⚠️ rclone reported an error (code $UP_EXIT)."
-            else
-              echo "✅ Upload succeeded"
-            fi
-          } 2>&1 | tee -a "$LOG_FILE"
+          # ---------- 5.2 יצירת ZIP ----------
+          ZIP_PATH="${TMP_DIR}/${ZIP_NAME}"
+          # נשתמש בשם הקובץ המקורי ב‑ZIP
+          ORIGINAL_NAME="$(basename "$DOWNLOADED_FILE")"
+          cp "$DOWNLOADED_FILE" "${TMP_DIR}/${ORIGINAL_NAME}"
+          (cd "$TMP_DIR" && zip -j -q "$ZIP_PATH" "$ORIGINAL_NAME")
+          if [[ ! -s "$ZIP_PATH" ]]; then
+            echo "❌ Zip creation failed"
+            exit 1
+          fi
+          echo "🗜️ Created ZIP → $ZIP_PATH (size=$(stat -c%s "$ZIP_PATH") bytes)"
 
-      # --------------------------------------------------------------
-      # 8️⃣  הצגת קבצים בתיקיית ה‑Drive (debug)
-      # --------------------------------------------------------------
-      - name: List files in Drive folder (debug)
-        env:
-          REMOTE_FOLDER: ${{ steps.name_builder.outputs.remote_folder }}
-          LOG_FILE: ${{ env.LOG_FILE }}
-        run: |
-          {
-            echo "=== Files now present in $REMOTE_FOLDER ==="
-            rclone lsf "$REMOTE_FOLDER"
-          } 2>&1 | tee -a "$LOG_FILE"
+          # ---------- 5.3 העלאה ל‑Google Drive ----------
+          echo "🚀 Uploading ZIP to Drive: $DEST_PATH"
+          rclone copy "$ZIP_PATH" "$DEST_PATH" --progress
 
-      # --------------------------------------------------------------
-      # 9️⃣  העלאת קובץ הלוג ל‑Drive (מתבצע **בכל מקרה**, גם אם קודמות נכשלו)
-      # --------------------------------------------------------------
-      - name: Upload log file to Drive
-        if: always()                         # הרץ תמיד, גם אם שלב קודם נכשל
-        env:
-          LOG_FILE: ${{ env.LOG_FILE }}
-          # שם תיקיית הלוגים – אפשר לשנות
-          LOGS_FOLDER: "Logs"
-          REMOTE_TARGET: "gdrive:${{ github.event.inputs.folder }}/${LOGS_FOLDER}"
-          LOG_DEST_NAME: "run-${{ github.run_id }}-$(date -u +%Y%m%d%H%M%S).log"
-        run: |
-          {
-            echo "=== Uploading log file ==="
-            echo "Log file path: $LOG_FILE"
-            echo "Will be stored in $REMOTE_TARGET as $LOG_DEST_NAME"
-            # ודא שהקובץ קיים (אם בכלל לא נוצר, ניצור קובץ ריק כדי שלא ייכשל rclone)
-            [ -f "$LOG_FILE" ] || touch "$LOG_FILE"
-            rclone copy "$LOG_FILE" "$REMOTE_TARGET/$LOG_DEST_NAME" --progress
-          } 2>&1 | tee -a "$LOG_FILE"
-
-      # --------------------------------------------------------------
-      # 🔟  ניקוי קבצים זמניים (לא קריטי – עובד גם אם הכשל מתרחש מוקדם)
-      # --------------------------------------------------------------
-      - name: Clean up temporary files
-        if: always()
-        run: |
-          rm -rf /tmp/video_download*
-          rm -rf /tmp/*.zip
-          rm -rf /tmp/*.tgz
+          # ניקוי – אופציונלי
+          rm -rf "$TMP_DIR"
+          echo "✅ Finished – ZIP uploaded successfully"
