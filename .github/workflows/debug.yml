@@ -1,4 +1,4 @@
-name: Debug With Deno
+name: Debug With Cookies
 
 on:
   workflow_dispatch:
@@ -11,23 +11,20 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install Deno
-        uses: denoland/setup-deno@v1
-        with:
-          deno-version: v1.x
-
       - name: Install yt-dlp
         run: pip3 install --upgrade yt-dlp
 
-      - name: Download with Deno
+      - name: Download with cookies
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
-          yt-dlp --js-runtimes deno --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
+          yt-dlp --cookies www.youtube.com_cookies.txt --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
           
           echo "=== EXIT CODE: $? ==="
+          echo "=== FILES DOWNLOADED ==="
+          ls -la /tmp/test/
 
-      - name: Send email
+      - name: Send email with log
         env:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         run: |
@@ -43,17 +40,19 @@ jobs:
           msg = MIMEMultipart()
           msg['From'] = 'p0556722432@gmail.com'
           msg['To'] = 'p0556722432@gmail.com'
-          msg['Subject'] = 'YouTube Debug Log with Deno'
+          msg['Subject'] = 'YouTube Debug Log with Cookies'
 
-          msg.attach(MIMEText(log_content, 'plain'))
+          body = f"Here is the YouTube debug log:\n\n{log_content}"
+          msg.attach(MIMEText(body, 'plain'))
 
           try:
               server = smtplib.SMTP('smtp.gmail.com', 587)
               server.starttls()
               server.login('p0556722432@gmail.com', os.environ['EMAIL_PASSWORD'])
-              server.sendmail('p0556722432@gmail.com', 'p0556722432@gmail.com', msg.as_string())
+              text = msg.as_string()
+              server.sendmail('p0556722432@gmail.com', 'p0556722432@gmail.com', text)
               server.quit()
-              print("EMAIL SENT")
+              print("=== EMAIL SENT SUCCESSFULLY ===")
           except Exception as e:
-              print(f"EMAIL FAILED: {e}")
+              print(f"=== EMAIL FAILED: {e} ==>")
           EOF
