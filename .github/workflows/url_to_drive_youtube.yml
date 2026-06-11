@@ -1,6 +1,5 @@
 name: Upload URL → Google Drive (Zip via temporary file)
 
-# מאפשר הרצה ידנית
 on:
   workflow_dispatch:
     inputs:
@@ -22,37 +21,49 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # ────────────────────────────────────────────────────────────────
-      # 1️⃣  התקנת rclone, yt-dlp, ffmpeg (הדרוש ל‑yt-dlp בכדי לשלב וידאו)
+      # 1️⃣  התקנת תלויות
       # ────────────────────────────────────────────────────────────────
-      - name: Install dependencies (rclone, yt-dlp, ffmpeg, zip)
+      - name: Install dependencies
         run: |
-          # rclone – כפי שעשית קודם
+          sudo apt-get update
+          sudo apt-get install -y curl unzip zip ffmpeg
+          
+          # rclone
           curl https://rclone.org/install.sh | sudo bash
-          # yt-dlp – binary ישיר
+          
+          # yt-dlp
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod +x /usr/local/bin/yt-dlp
-          # ffmpeg – דרוש להמרת אודיו/וידאו של yt-dlp
-          sudo apt-get update && sudo apt-get install -y ffmpeg
-          # zip – כבר מותקן, רק למען שלמות
-          sudo apt-get install -y zip
+          sudo chmod a+rx /usr/local/bin/yt-dlp
 
       # ────────────────────────────────────────────────────────────────
-      # 2️⃣  קונפיג של rclone (remote בשם gdrive)
+      # 2️⃣  קונפיג של rclone – עם בדיקת תקינות
       # ────────────────────────────────────────────────────────────────
       - name: Write rclone config
         env:
           RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
         run: |
           mkdir -p ~/.config/rclone
+          
+          # בדיקה שה-token לא ריק
+          if [ -z "$RCLONE_GDRIVE_TOKEN" ]; then
+            echo "❌ RCLONE_GDRIVE_TOKEN is empty!"
+            exit 1
+          fi
+          
+          echo "Token length: ${#RCLONE_GDRIVE_TOKEN}"
+          echo "Token starts with: ${RCLONE_GDRIVE_TOKEN:0:20}..."
+          
           cat > ~/.config/rclone/rclone.conf <<EOF
           [gdrive]
           type = drive
           scope = drive.file
-          token = $RCLONE_GDRIVE_TOKEN
+          token = ${RCLONE_GDRIVE_TOKEN}
           EOF
+          
+          echo "✅ rclone config written"
 
       # ────────────────────────────────────────────────────────────────
-      # 3️⃣  חשבון שמות – zip_name (ב‑Drive) ו‑original_name (ב‑ZIP)
+      # 3️⃣  חשבון שמות
       # ────────────────────────────────────────────────────────────────
       - name: Determine file names
         id: names
@@ -62,9 +73,7 @@ jobs:
         run: |
           set -e
 
-          # 3.1 – נזהה אם מדובר ב‑YouTube (או URL ישיר)
           if echo "$FILE_URL" | grep -iq "youtube.com\|youtu.be"; then
-            # נשתמש בשם ברירת‑מחדל של yt-dlp (תחת הכותרת)
             base_name="${USER_NAME:-yt_video}"
           else
             raw_name=$(basename "$FILE_URL")
@@ -73,17 +82,34 @@ jobs:
             base_name="${USER_NAME:-${decoded_name%.*}}"
           fi
 
+          # ניקוי תווים בלתי חוקיים מהשם
+          base_name=$(echo "$base_name" | sed 's/[\/\\:*?"<>|]/_/g')
+
           zip_name="${base_name}.zip"
           echo "zip_name=$zip_name" >> $GITHUB_OUTPUT
 
-          # נתיב מרוחק ב‑Drive
           remote_path="gdrive:${{ github.event.inputs.folder }}/$zip_name"
           echo "remote_path=$remote_path" >> $GITHUB_OUTPUT
+          echo "📛 ZIP name: $zip_name"
+          echo "📁 Remote path: $remote_path"
 
       # ────────────────────────────────────────────────────────────────
-      # 4️⃣  (אופציונלי) מחיקת קובץ קיים באותו שם על‑Drive
+      # 4️⃣  בדיקת חיבור ל-Drive
       # ────────────────────────────────────────────────────────────────
-      - name: Delete old ZIP if it exists
+      - name: Test rclone connection
+        run: |
+          echo "🔍 Testing rclone connection..."
+          rclone lsd gdrive: || {
+            echo "❌ Cannot connect to gdrive. Checking config..."
+            cat ~/.config/rclone/rclone.conf
+            exit 1
+          }
+          echo "✅ Connected to Google Drive"
+
+      # ────────────────────────────────────────────────────────────────
+      # 5️⃣  מחיקת קובץ קיים
+      # ────────────────────────────────────────────────────────────────
+      - name: Delete old ZIP if exists
         env:
           REMOTE_PATH: ${{ steps.names.outputs.remote_path }}
         run: |
@@ -95,7 +121,7 @@ jobs:
           fi
 
       # ────────────────────────────────────────────────────────────────
-      # 5️⃣  הורדת קובץ (YouTube או קובץ ישיר) → יצירת ZIP → העלאה ל‑Drive
+      # 6️⃣  הורדה → ZIP → העלאה
       # ────────────────────────────────────────────────────────────────
       - name: Download → zip → upload
         env:
@@ -109,46 +135,61 @@ jobs:
           TMP_DIR=$(mktemp -d)
           echo "📂 Working directory = $TMP_DIR"
 
-          # ---------- 5.1 הורדה ----------
+          # ---------- 6.1 הורדה ----------
           if echo "$FILE_URL" | grep -iq "youtube.com\|youtu.be"; then
             echo "🎬 Detected YouTube URL – using yt-dlp"
-            # -f bestvideo+bestaudio – מבקש את האיכות הטובה ביותר
-            # -o משתנה שם קובץ: שם בסיס + המקור של הקובץ (כל מה שלא צריך)
-            OUTPUT_PATH="${TMP_DIR}/downloaded_media.%(ext)s"
-            yt-dlp -f "bestvideo+bestaudio/best" -o "$OUTPUT_PATH" "$FILE_URL"
-            # מציאת שם הקובץ שה-yt-dlp יצר בפועל
-            DOWNLOADED_FILE=$(ls "${TMP_DIR}" | head -n1)
-            DOWNLOADED_FILE="${TMP_DIR}/${DOWNLOADED_FILE}"
+            yt-dlp --no-playlist -f "bestvideo+bestaudio/best" \
+              -o "${TMP_DIR}/downloaded_media.%(ext)s" \
+              --merge-output-format mkv \
+              "$FILE_URL" 2>&1 || {
+                echo "⚠️ yt-dlp failed, trying audio only..."
+                yt-dlp --no-playlist -f "bestaudio/best" \
+                  -o "${TMP_DIR}/downloaded_media.%(ext)s" \
+                  "$FILE_URL"
+              }
+            
+            DOWNLOADED_FILE=$(find "$TMP_DIR" -type f | head -n1)
           else
             echo "⬇️ Direct URL – using curl"
             DOWNLOADED_FILE="${TMP_DIR}/downloaded_file"
-            curl -L -s -o "$DOWNLOADED_FILE" "$FILE_URL"
+            curl -L --max-time 600 -s -o "$DOWNLOADED_FILE" "$FILE_URL" || {
+              echo "❌ curl failed with code $?"
+              exit 1
+            }
           fi
 
-          # וידוא שהקובץ קיים ולא ריק
           if [[ ! -s "$DOWNLOADED_FILE" ]]; then
             echo "❌ Download failed or file is empty"
-            ls -l "$TMP_DIR"
+            ls -la "$TMP_DIR"
             exit 1
           fi
-          echo "✅ Downloaded → $DOWNLOADED_FILE (size=$(stat -c%s "$DOWNLOADED_FILE") bytes)"
+          
+          echo "✅ Downloaded → $DOWNLOADED_FILE"
+          echo "   Size: $(du -h "$DOWNLOADED_FILE" | cut -f1)"
 
-          # ---------- 5.2 יצירת ZIP ----------
+          # ---------- 6.2 יצירת ZIP ----------
           ZIP_PATH="${TMP_DIR}/${ZIP_NAME}"
-          # נשתמש בשם הקובץ המקורי ב‑ZIP
           ORIGINAL_NAME="$(basename "$DOWNLOADED_FILE")"
           cp "$DOWNLOADED_FILE" "${TMP_DIR}/${ORIGINAL_NAME}"
+          
           (cd "$TMP_DIR" && zip -j -q "$ZIP_PATH" "$ORIGINAL_NAME")
+          
           if [[ ! -s "$ZIP_PATH" ]]; then
             echo "❌ Zip creation failed"
             exit 1
           fi
-          echo "🗜️ Created ZIP → $ZIP_PATH (size=$(stat -c%s "$ZIP_PATH") bytes)"
+          echo "🗜️ Created ZIP → $ZIP_PATH (size=$(du -h "$ZIP_PATH" | cut -f1))"
 
-          # ---------- 5.3 העלאה ל‑Google Drive ----------
+          # ---------- 6.3 העלאה ל-Drive ----------
           echo "🚀 Uploading ZIP to Drive: $DEST_PATH"
-          rclone copy "$ZIP_PATH" "$DEST_PATH" --progress
+          rclone copy "$ZIP_PATH" "$DEST_PATH" --progress --drive-chunk-size 64M
+          
+          # וידוא העלאה
+          if rclone lsf "$DEST_PATH" > /dev/null 2>&1; then
+            echo "✅ Successfully uploaded to Google Drive!"
+          else
+            echo "❌ Upload verification failed"
+            exit 1
+          fi
 
-          # ניקוי – אופציונלי
           rm -rf "$TMP_DIR"
-          echo "✅ Finished – ZIP uploaded successfully"
