@@ -11,16 +11,33 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install yt-dlp
-        run: pip3 install --upgrade yt-dlp
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade yt-dlp
+          sudo apt-get update
+          sudo apt-get install -y nodejs
 
-      - name: Download with cookies
+      - name: Debug formats
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
-          yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=dQw4w9WgXcQ" 2>&1 | tee /tmp/log.txt
-          
-          echo "=== EXIT CODE: $? ==="
+
+          echo "=== YT-DLP VERSION ==="
+          yt-dlp --version
+
+          echo "=== LIST FORMATS ==="
+          yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --skip-download --list-formats "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/list_formats.txt
+
+      - name: Download with cookies
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/test
+          cd /tmp/test
+
+          echo "=== DOWNLOAD ==="
+          yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
+
+          echo "=== EXIT CODE: ${PIPESTATUS[0]} ==="
 
       - name: Send email
         env:
@@ -32,8 +49,13 @@ jobs:
           from email.mime.multipart import MIMEMultipart
           import os
 
-          with open('/tmp/log.txt', 'r') as f:
-              log_content = f.read()
+          log_content = ""
+
+          for path in ['/tmp/log.txt', '/tmp/list_formats.txt']:
+              if os.path.exists(path):
+                  with open(path, 'r') as f:
+                      log_content += f"\n\n========== {path} ==========\n"
+                      log_content += f.read()
 
           msg = MIMEMultipart()
           msg['From'] = 'p0556722432@gmail.com'
