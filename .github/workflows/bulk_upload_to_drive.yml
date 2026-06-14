@@ -1,28 +1,27 @@
 name: Bulk upload URLs → Google Drive (one ZIP per URL)
 
-# אפשר להפעיל ידנית או באופן אוטומטי כשהקובץ urls.txt מתעדכן
 on:
-  workflow_dispatch:                     # הרצה ידנית
+  workflow_dispatch:
   push:
     paths:
-      - 'bulk/urls.txt'                  # שינוי בקובץ → ריצה אוטומטית
+      - 'bulk/urls.txt'          # ריצה אוטומטית כשקובץ הקלט מתעדכן
 
 jobs:
   bulk-upload:
     runs-on: ubuntu-latest
     env:
-      # תיקיית ה‑Drive שאליה יועלו הקבצים (אפשר לשנות מה‑UI גם)
+      # ניתן לשנות את שם התיקייה ב‑GitHub UI על‑ידי קלט (workflow_dispatch) אם תרצה
       DEST_FOLDER: MyUploads
     steps:
       # --------------------------------------------------------------
-      # 0️⃣  התקנת rclone (zip, curl, mktemp כבר במערכת)
+      # 0️⃣  rclone (zip, curl, mktemp כבר במערכת)
       # --------------------------------------------------------------
       - name: Install rclone
         run: |
           curl https://rclone.org/install.sh | sudo bash
 
       # --------------------------------------------------------------
-      # 1️⃣  קובץ קונפיג ל‑rclone (remote בשם gdrive)
+      # 1️⃣  קונפיג של rclone (remote בשם gdrive)
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
@@ -37,17 +36,24 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 2️⃣  משיכת הקוד (כולל bulk/urls.txt)
+      # 2️⃣  משיכת הקוד (כדי לקבל bulk/urls.txt)
       # --------------------------------------------------------------
       - name: Checkout repository
-        uses: actions/checkout@v4   # מושך את כל המאגר – קובץ urls.txt יהיה כאן
+        uses: actions/checkout@v4
 
       # --------------------------------------------------------------
-      # 3️⃣  לולאה על כל השורות של bulk/urls.txt
+      # 3️⃣  וידוא שה‑folder ב‑Drive קיים (rclone mkdir)
+      # --------------------------------------------------------------
+      - name: Ensure destination folder exists on Drive
+        run: |
+          rclone mkdir "gdrive:${DEST_FOLDER}" || echo "Folder already exists – continue"
+
+      # --------------------------------------------------------------
+      # 4️⃣  קריאת קובץ הקלט, לולאה על כל שורה
       # --------------------------------------------------------------
       - name: Process every URL and upload as ZIP
         env:
-          DEST_FOLDER: ${{ env.DEST_FOLDER }}
+          DEST_FOLDER: ${{ env.DEST_FOLDER }}   # מבטיח שה‑variable יועבר לסביבה של הפקודה
         run: |
           set -e
           set -o pipefail
@@ -55,79 +61,98 @@ jobs:
           INPUT_FILE="bulk/urls.txt"
 
           if [[ ! -f "$INPUT_FILE" ]]; then
-            echo "❌ קובץ הקלט $INPUT_FILE אינו קיים"
+            echo "❌ INPUT FILE $INPUT_FILE not found"
             exit 1
           fi
 
-          # פונקציה שמטפלת ב‑URL אחד
+          echo "✅ Input file found – beginning processing"
+          echo "===== CONTENTS OF $INPUT_FILE ====="
+          cat "$INPUT_FILE"
+          echo "==================================="
+
+          # -------------------- פונקציה אחת לכל URL --------------------
           process_one() {
             local url="$1"
             local custom_name="$2"
 
-            # ---------- 1️⃣ שם הקובץ מה‑URL ----------
+            # 1️⃣ decode URL‑basename -------------------------------------------------
             raw_name=$(basename "$url")
             raw_name=${raw_name%%\?*}                     # חותך ?query אם קיים
             decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
             echo "🔤 Decoded name from URL = $decoded_name"
 
-            # ---------- 2️⃣ basename של קובץ ה‑ZIP ----------
+            # 2️⃣ בחר שם ZIP ---------------------------------------------------------
             if [[ -n "$custom_name" ]]; then
               base_name="$custom_name"
             else
-              base_name="${decoded_name%.*}"               # מסיר סיומת (אם יש)
+              base_name="${decoded_name%.*}"               # מסיר סיומת קיימת
             fi
             zip_name="${base_name}.zip"
             internal_name="$decoded_name"
 
-            echo "📦 ZIP name that will be created = $zip_name"
-            echo "📁 Internally stored file name  = $internal_name"
+            echo "📦 ZIP name to be created : $zip_name"
+            echo "📁 Internal file name    : $internal_name"
 
-            # ---------- 3️⃣ work‑dir זמני ----------
+            # 3️⃣ work‑dir זמני -------------------------------------------------------
             work_dir=$(mktemp -d)
             src_file="${work_dir}/downloaded"
             zip_file="${work_dir}/${zip_name}"
 
-            # ---------- 4️⃣ הורדה ----------
+            # 4️⃣ הורדה ---------------------------------------------------------------
             echo "⬇️ Downloading $url → $src_file"
-            curl -L -s -o "$src_file" "$url"
+            #  --fail מחזיר קוד 22 במקרה של קוד HTTP ≥ 400
+            curl -L --fail -s -o "$src_file" "$url" \
+              || { echo "❌ curl download failed for $url"; exit 1; }
+
+            # וודא שהקובץ שהורד אינו ריק
             if [[ ! -s "$src_file" ]]; then
-              echo "❌ הורדה נכשלה או שהקובץ ריק – $url"
+              echo "❌ Downloaded file is empty – abort"
               exit 1
             fi
 
-            # ---------- 5️⃣ יצירת ZIP ----------
+            # 5️⃣ יצירת ZIP -----------------------------------------------------------
             cp "$src_file" "${work_dir}/${internal_name}"
-            (cd "$work_dir" && zip -j -q "$zip_file" "$internal_name")
+            # (cd …) כדי שה‑zip ישמור על שם קובץ יחיד ללא נתיב
+            (cd "$work_dir" && zip -j -q "$zip_file" "$internal_name") \
+              || { echo "❌ zip creation failed for $url"; exit 1; }
+
             if [[ ! -s "$zip_file" ]]; then
-              echo "❌ יצירת ZIP נכשלה – $zip_name"
+              echo "❌ Resulting ZIP is empty – abort"
               exit 1
             fi
 
-            # ---------- 6️⃣ העלאה ל‑Drive ----------
+            # 6️⃣ העלאת ZIP ל‑Drive ----------------------------------------------------
             remote_path="gdrive:${DEST_FOLDER}/${zip_name}"
             echo "🚀 Uploading $zip_name → $remote_path"
-            rclone copy "$zip_file" "$remote_path" --progress
+            rclone copy "$zip_file" "$remote_path" --progress \
+              || { echo "❌ rclone upload failed for $zip_name"; exit 1; }
 
             # ניקוי זמני
             rm -rf "$work_dir"
+            echo "✅ Finished processing $url"
           }
+          # -------------------------------------------------------------------------
 
-          # -------------------------------------------------
-          # קריאה לפונקציה על‑פי כל שורה בקובץ
-          # -------------------------------------------------
+          # קריאה לפונקציה לכל שורה בקובץ
           line_no=0
           while IFS= read -r line || [[ -n "$line" ]]; do
             ((line_no++))
-            # דלג על ריק או על שורות שמתחילות ב‑#
+            # דלג על ריק או על שורה שמתחילה ב-#
             [[ -z "$line" || "$line" =~ ^# ]] && continue
 
-            # פצל ל‑URL ו‑optional‑basename
+            # פצל לשני שדות (URL ו‑basename אופציונלי)
             IFS='|' read -r url opt_name <<< "$line"
-            url=$(echo "$url" | xargs)          # trim spaces
-            opt_name=$(echo "$opt_name" | xargs)   # יכול לשאר ריק
+            url=$(echo "$url" | xargs)                 # trim whitespace
+            opt_name=$(echo "$opt_name" | xargs)       # יכול להיות ריק
 
-            echo "=== מעבד שורה #$line_no ==="
+            # בדיקת URL בסיסית (מניעת קריאת "https://")
+            if [[ ! "$url" =~ ^https?:// ]]; then
+              echo "⚠️ Skipping line #$line_no – not a valid URL: $url"
+              continue
+            fi
+
+            echo "=== Processing line #$line_no ==="
             process_one "$url" "$opt_name"
           done < "$INPUT_FILE"
 
-          echo "✅ כל הקבצים הועלו בהצלחה!"
+          echo "🎉 🎉 🎉  All URLs have been processed successfully! 🎉 🎉 🎉"
