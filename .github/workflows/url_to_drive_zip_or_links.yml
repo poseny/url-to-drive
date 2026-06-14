@@ -1,37 +1,34 @@
-name: Upload URL → Google Drive (media‑or‑links ZIP)
+name: Upload URL → Google Drive (no zip – media or links.txt)
 
-# --------------------------------------------------------------
-# אפשר להריץ ידנית -> יוצג כפתור “Run workflow”
-# --------------------------------------------------------------
+# הרצה ידנית מה‑UI של GitHub
 on:
   workflow_dispatch:
     inputs:
       url:
         description: "כתובת URL של קובץ מדיה או של דף HTML"
         required: true
-        default: "https://upload.wikimedia.org/wikipedia/commons/d/d6/Her_First_Kiss_%281919%29.webm"
+        default: "https://commons.wikimedia.org/wiki/File:Bilby_Looking_for_food_at_night.webm"
       folder:
         description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
         required: true
         default: "MyUploads"
       filename:
-        description: "שם קובץ לבסיס (בלי סיומת). אם ריק – ייקח משם הקובץ/כותרת הדף"
+        description: "שם קובץ לבסיס (בלי סיומת). אם ריק – ייקח מה‑URL/כותרת הדף"
         required: false
         default: ""
 
 jobs:
   upload:
     runs-on: ubuntu-latest
-
     steps:
       # --------------------------------------------------------------
-      # 0️⃣  Checkout – דרוש רק כדי שה‑workflow יופיע בתפריט “Run workflow”
+      # 0️⃣  Checkout – רק כדי שה‑UI של GitHub יראה את ה‑workflow
       # --------------------------------------------------------------
       - name: Checkout repository (required for UI)
         uses: actions/checkout@v3
 
       # --------------------------------------------------------------
-      # 1️⃣  Install rclone + כמה כלי עזר (lynx – לחילוץ כותרת HTML)
+      # 1️⃣  Install rclone + lynx (לצורך חילוץ כותרת HTML)
       # --------------------------------------------------------------
       - name: Install rclone and lynx
         run: |
@@ -40,7 +37,7 @@ jobs:
           sudo apt-get install -y lynx
 
       # --------------------------------------------------------------
-      # 2️⃣  כתיבת קונפיג של rclone (Remote בשם gdrive)
+      # 2️⃣  רישום הקונפיג של rclone (remote בשם gdrive)
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
@@ -55,9 +52,9 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣  קביעת Content‑Type וה‑base‑name של קובץ ה‑ZIP
+      # 3️⃣  ניתוח ה‑Content‑Type ובחירת base‑name ל‑קובץ
       # --------------------------------------------------------------
-      - name: Resolve content type and base name
+      - name: Resolve content‑type & base name
         id: resolve
         env:
           FILE_URL: ${{ github.event.inputs.url }}
@@ -65,121 +62,92 @@ jobs:
         run: |
           set -e
 
-          # ----- 3.1 – קבלת ה‑Content‑Type מה‑header -----
-          # -I מבקש רק את ה‑headers, -L עוקב אחרי הפניות
-          CONTENT_TYPE=$(curl -sI -L "$FILE_URL" |
-                         awk -F': ' '/^[Cc]ontent-[Tt]ype/ {print $2}' |
-                         tr -d '\r')
-          echo "🕵️‍♂️ Content‑Type = $CONTENT_TYPE"
+          # 3.1 – קבלת Content‑Type (ה‑header מה‑שרת)
+          CONTENT_TYPE=$(curl -sI -L "$FILE_URL" | awk -F': ' '/^[Cc]ontent-[Tt]ype/ {print $2}' | tr -d '\r')
+          echo "🕵️ Content‑Type = $CONTENT_TYPE"
 
-          # ----- 3.2 – בחירת שם בסיס ל‑ZIP ----------
+          # 3.2 – בחירת שם בסיס (Base name) ל‑קובץ/קובץ‑טקסט
           if [[ -n "$USER_NAME" ]]; then
             BASE_NAME="$USER_NAME"
           else
             if [[ "$CONTENT_TYPE" == text/html* ]]; then
-              # דף HTML – נשתמש בכותרת <title>
-              PAGE_TITLE=$(curl -sL "$FILE_URL" |
-                           lynx -dump -force_html -nolist -stdin |
-                           head -n 1)
-              # ניקוי תווים שב‑Filesystem לא אוהב
+              # דף HTML – משיגים את כותרת ה‑<title>
+              PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin | head -n 1)
               CLEAN_TITLE=$(echo "$PAGE_TITLE" | tr -cd '[:alnum:] _-')
               BASE_NAME="${CLEAN_TITLE:-page}"
             else
-              # קובץ מדיה – שם הקובץ מתוך ה‑URL
+              # קובץ מדיה – שם קובץ מה‑URL (בלי סיומת)
               raw_name=$(basename "$FILE_URL")
-              raw_name=${raw_name%%\?*}        # חותך ?query‑string אם קיים
-              BASE_NAME="${raw_name%.*}"       # מסיר סיומת קיימת
+              raw_name=${raw_name%%\?*}
+              BASE_NAME="${raw_name%.*}"
             fi
           fi
 
-          ZIP_NAME="${BASE_NAME}.zip"
-          echo "🔤 Base name   = $BASE_NAME"
-          echo "📦 ZIP name    = $ZIP_NAME"
-
-          echo "zip_name=$ZIP_NAME"          >> $GITHUB_OUTPUT
-          echo "content_type=$CONTENT_TYPE"  >> $GITHUB_OUTPUT
-          echo "base_name=$BASE_NAME"        >> $GITHUB_OUTPUT
-          echo "remote_path=gdrive:${{ github.event.inputs.folder }}/$ZIP_NAME" \
-               >> $GITHUB_OUTPUT
+          echo "🔤 Base name = $BASE_NAME"
+          echo "base_name=$BASE_NAME" >> $GITHUB_OUTPUT
+          echo "content_type=$CONTENT_TYPE" >> $GITHUB_OUTPUT
+          # נתיב על‑Drive – נקבע ב‑step 6
+          echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 4️⃣  יצירת תיקייה זמנית שבה נשמרים הקבצים לפני הארכוב
+      # 4️⃣  יצירת תיקייה זמנית לעבודה
       # --------------------------------------------------------------
-      - name: Create temporary working directory
+      - name: Create temporary directory
         id: tmpdir
         run: |
           TMPDIR=$(mktemp -d)
           echo "tmpdir=$TMPDIR" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 5️⃣  הורדה → (אם HTML) חילוץ קישורים → יצירת ZIP
+      # 5️⃣  הורדה, חילוץ (אם HTML) ו‑upload ללא zip
       # --------------------------------------------------------------
-      - name: Download / (optional) extract links / create ZIP
+      - name: Download / extract / upload (no zip)
         env:
           FILE_URL: ${{ github.event.inputs.url }}
           CONTENT_TYPE: ${{ steps.resolve.outputs.content_type }}
           BASE_NAME: ${{ steps.resolve.outputs.base_name }}
-          ZIP_NAME: ${{ steps.resolve.outputs.zip_name }}
+          REMOTE_BASE: ${{ steps.resolve.outputs.remote_base }}
           TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
         run: |
           set -e
           set -o pipefail
           cd "$TMPDIR"
 
-          # ==========================================================
-          # 5A – קובץ מדיה רגיל (לא HTML)
-          # ==========================================================
+          # ==============================================
+          #   קובץ מדיה – ללא דחיסה, העברה ישירה
+          # ==============================================
           if [[ "$CONTENT_TYPE" != text/html* ]]; then
-            echo "📥 Downloading binary media → $BASE_NAME"
+            echo "📥 Downloading media file → $BASE_NAME"
             curl -L -s -o "$BASE_NAME" "$FILE_URL"
 
-            echo "🗜️ Creating ZIP that contains the media file"
-            zip -j -q "$ZIP_NAME" "$BASE_NAME"
+            echo "🚀 Uploading media file directly to Drive"
+            rclone copy "$BASE_NAME" "$REMOTE_BASE" --progress
 
-          # ==========================================================
-          # 5B – דף HTML – נחלץ קישורים ישירים למדיה
-          # ==========================================================
+          # ==============================================
+          #   דף HTML – חיפוש קישורים למדיה → links.txt
+          # ==============================================
           else
             echo "📄 Downloading HTML page"
             curl -L -s -o "page.html" "$FILE_URL"
 
-            echo "🔎 Extracting direct‑media links from the HTML"
-            # רשימת סיומות מדיה שחשוב ללכוד – אפשר להרחיב לפי צורך
-            MEDIA_REGEX='https?://[^\"'"'"']+\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)'
+            echo "🔎 Extracting direct‑media links from HTML"
+            # רשימת סיומות למדיה (אפשר להרחיב)
+            MEDIA_REGEX='https?://[^"]+\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)'
             grep -Eo "$MEDIA_REGEX" "page.html" | sort -u > "links.txt" || true
 
-            # במידה ולא נמצא קישור – נכתוב הודעה ברורה
             if [[ ! -s "links.txt" ]]; then
               echo "No direct media links were found on the page." > "links.txt"
             fi
 
-            echo "🗜️ Zipping the links.txt file"
-            zip -j -q "$ZIP_NAME" "links.txt"
-          fi
-
-          # אימות שה‑ZIP נוצר ושקולו גדול מ‑0
-          if [[ ! -s "$ZIP_NAME" ]]; then
-            echo "❌ ZIP creation failed – file size is zero"
-            exit 1
+            echo "🚀 Uploading links.txt to Drive"
+            # כאן אנחנו מייצרים שם קובץ על‑Drive: <BASE_NAME>.txt
+            rclone copy "links.txt" "${REMOTE_BASE}.txt" --progress
           fi
 
       # --------------------------------------------------------------
-      # 6️⃣  העלאת קובץ ה‑ZIP ל‑Google Drive
+      # 6️⃣  ניקוי קבצים זמניים (רצת runner תסגור את הכל אוטומטית)
       # --------------------------------------------------------------
-      - name: Upload ZIP to Google Drive
-        env:
-          REMOTE_PATH: ${{ steps.resolve.outputs.remote_path }}
-          TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
-        run: |
-          set -e
-          cd "$TMPDIR"
-          echo "🚀 Uploading $ZIP_NAME → $REMOTE_PATH"
-          rclone copy "$ZIP_NAME" "$REMOTE_PATH" --progress
-
-      # --------------------------------------------------------------
-      # 7️⃣  ניקוי קבצים זמניים (ה‑runner אף‑כך מנקה /tmp)
-      # --------------------------------------------------------------
-      - name: Clean temporary directory
+      - name: Clean temporary files
         if: always()
         env:
           TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
