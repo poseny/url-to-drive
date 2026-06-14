@@ -1,41 +1,40 @@
-name: Upload Multiple URLs → Google Drive (ZIP loop)
+name: Upload URL → Google Drive (Zip via temporary file)
 
+# מאפשר הרצה ידנית
 on:
   workflow_dispatch:
     inputs:
-      urls:
-        description: |
-          רשימת קישורים – שורה אחת לכל קישור.
-          (דוגמה בתיעוד של הקלט)
+      url:
+        description: "כתובת URL אחת, או רשימה - כל שורה URL"
         required: true
         default: |
-          https://ahblicklive.com/new_ded_video/26/23/VnOMPDVrju0PTSBRnvz/NNHEEG/480.mp4
           https://upload.wikimedia.org/wikipedia/commons/d/d6/Her_First_Kiss_%281919%29.webm
       folder:
-        description: "תיקיית יעד ב‑Drive"
+        description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
         required: true
         default: "MyUploads"
-      filename_prefix:
-        description: |
-          קידומת לשמות קובצי ZIP (ריק = שימוש בשם המקור). 
-          אם תזין “BatchA” ויהיו 3 קישורים, תתקבלנה:
-            BatchA_1.zip, BatchA_2.zip, BatchA_3.zip
+      filename:
+        description: "שם קובץ לפני .zip (אם ריק – ייקח משם הקובץ ב‑URL)"
         required: false
         default: ""
+      parallel_jobs:
+        description: "כמה URLs להוריד/להעלות במקביל"
+        required: false
+        default: "3"
 
 jobs:
-  upload-multiple:
+  upload:
     runs-on: ubuntu-latest
     steps:
       # --------------------------------------------------------------
-      # 1️⃣  התקנת rclone (zip וכד’ כבר קיימים במערכת Ubuntu)
+      # 1️⃣  התקנת rclone
       # --------------------------------------------------------------
       - name: Install rclone
         run: |
           curl https://rclone.org/install.sh | sudo bash
 
       # --------------------------------------------------------------
-      # 2️⃣  כתיבת קונפיג של rclone (remote בשם gdrive)
+      # 2️⃣  קונפיג של rclone
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
@@ -50,64 +49,154 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣  לולאה על כל הקישורים
+      # 3️⃣  חישוב שמות לכל URL ברשימה
       # --------------------------------------------------------------
-      - name: Process all URLs
+      - name: Determine file names
+        id: names
         env:
-          URLS: ${{ github.event.inputs.urls }}
+          URL_INPUT: ${{ github.event.inputs.url }}
+          USER_NAME: ${{ github.event.inputs.filename }}
           FOLDER: ${{ github.event.inputs.folder }}
-          PREFIX: ${{ github.event.inputs.filename_prefix }}
+        run: |
+          set -e
+
+          MANIFEST_FILE=$(mktemp)
+          count=0
+
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line//$'\r'/}"
+            line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+            [[ -z "$line" ]] && continue
+            [[ "$line" == \#* ]] && continue
+
+            FILE_URL="$line"
+
+            # ----- שם הקובץ מ‑URL -----
+            raw_name=$(basename "$FILE_URL")
+            raw_name=${raw_name%%\?*}
+
+            # decode %XX
+            decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
+
+            # ----- שם קובץ ZIP -----
+            if [[ -n "$USER_NAME" ]]; then
+              base_name="$USER_NAME"
+            else
+              base_name="${decoded_name%.*}"
+            fi
+
+            ZIP_NAME="${base_name}.zip"
+            ORIGINAL_NAME="$decoded_name"
+            REMOTE_PATH="gdrive:${FOLDER}/$ZIP_NAME"
+
+            printf '%s\t%s\t%s\t%s\t%s\n' "$FILE_URL" "$FOLDER" "$ZIP_NAME" "$ORIGINAL_NAME" "$REMOTE_PATH" >> "$MANIFEST_FILE"
+
+            count=$((count + 1))
+          done <<< "$URL_INPUT"
+
+          if [[ "$count" -eq 0 ]]; then
+            echo "❌ No URLs found"
+            exit 1
+          fi
+
+          echo "📦 Found $count URL(s)"
+          cat "$MANIFEST_FILE"
+
+          echo "manifest_file=$MANIFEST_FILE" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------------------
+      # 4️⃣  מחיקת קבצים קיימים באותו שם ב‑Drive
+      # --------------------------------------------------------------
+      - name: Delete old ZIP(s) if they exist
+        env:
+          MANIFEST_FILE: ${{ steps.names.outputs.manifest_file }}
+        run: |
+          set -e
+
+          while IFS=$'\t' read -r FILE_URL FOLDER ZIP_NAME ORIGINAL_NAME REMOTE_PATH; do
+            if rclone lsf "$REMOTE_PATH" > /dev/null 2>&1; then
+              echo "🗑️ Deleting previous $REMOTE_PATH"
+              rclone delete "$REMOTE_PATH"
+            else
+              echo "✅ No previous ZIP found: $REMOTE_PATH"
+            fi
+          done < "$MANIFEST_FILE"
+
+      # --------------------------------------------------------------
+      # 5️⃣  הורדה → ZIP → העלאה ל‑Drive במקביל
+      # --------------------------------------------------------------
+      - name: Download → zip → upload
+        env:
+          MANIFEST_FILE: ${{ steps.names.outputs.manifest_file }}
+          PARALLEL_JOBS: ${{ github.event.inputs.parallel_jobs }}
         run: |
           set -e
           set -o pipefail
 
-          # נוודא שיש קו חדש אחרי כל שורה (ה‑default של GitHub לעיתים משאיר רווח בקצה)
-          URLS=$(printf "%s\n" "$URLS")
+          if [[ -z "$PARALLEL_JOBS" || ! "$PARALLEL_JOBS" =~ ^[0-9]+$ || "$PARALLEL_JOBS" -lt 1 ]]; then
+            PARALLEL_JOBS=3
+          fi
 
-          COUNTER=0   # משמש למספר קידומת אם בקשת PREFIX
-          while IFS= read -r FILE_URL; do
-            # דלג על שורות ריקות (אם היו)
-            [[ -z "$FILE_URL" ]] && continue
-            ((COUNTER++))
+          upload_one() {
+            local line="$1"
+            local FILE_URL FOLDER ZIP_NAME ORIGINAL_NAME DEST_PATH
 
-            echo "=============================="
-            echo "🔗 Processing #${COUNTER}: $FILE_URL"
+            IFS=$'\t' read -r FILE_URL FOLDER ZIP_NAME ORIGINAL_NAME DEST_PATH <<< "$line"
 
-            # ---- שלב 1 – חישוב שם קובץ מקורי מה‑URL ----------
-            raw_name=$(basename "$FILE_URL")
-            raw_name=${raw_name%%\?*}                     # חותך query‑string אם קיים
-            decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
-            echo "🔤 Decoded name from URL = $decoded_name"
+            TMP_DIR=$(mktemp -d)
+            TMP_FILE="${TMP_DIR}/downloaded_file"
+            TMP_ZIP="${TMP_DIR}/${ZIP_NAME}"
 
-            # ---- שלב 2 – בחירת שם קובץ ZIP --------------------
-            if [[ -n "$PREFIX" ]]; then
-              zip_name="${PREFIX}_${COUNTER}.zip"
-            else
-              # מייצרים שם ZIP מה‑basename של הקובץ המקורי, ללא סיומת
-              base_without_ext="${decoded_name%.*}"
-              zip_name="${base_without_ext}.zip"
+            echo "📂 Working directory = $TMP_DIR"
+
+            # 1️⃣ הורדה
+            echo "⬇️ Downloading $FILE_URL → $TMP_FILE"
+            if ! curl -L -s -o "$TMP_FILE" "$FILE_URL"; then
+              echo "❌ Download failed: $FILE_URL"
+              rm -rf "$TMP_DIR"
+              return 1
             fi
 
-            echo "📦 ZIP name that will be stored on Drive = $zip_name"
+            if [[ ! -s "$TMP_FILE" ]]; then
+              echo "❌ Download failed or file is empty: $FILE_URL"
+              rm -rf "$TMP_DIR"
+              return 1
+            fi
 
-            # ---- שלב 3 – נתיב יעד ב‑Drive --------------------
-            remote_path="gdrive:${FOLDER}/${zip_name}"
-            echo "🗂️ Remote path = $remote_path"
+            # 2️⃣ יצירת ZIP
+            echo "🗜️ Creating ZIP $TMP_ZIP with internal name '$ORIGINAL_NAME'"
 
-            # -------------------------------------------------
-            # 3️⃣   הורדה → zip (עם שם פנימי) → העלאה
-            # -------------------------------------------------
-            #   - `zip -q - -:"$decoded_name" -` :
-            #        * יוצר ZIP שמיכתוב ל‑stdout,
-            #        * שם קובץ הפנימי הוא $decoded_name,
-            #        * הקובץ עצמו נקרא מ‑stdin (ה‑wget).
-            #   - `rclone rcat` מעלה ישירות ל‑Drive.
-            # -------------------------------------------------
-            wget -q -O - "$FILE_URL" \
-              | zip -q - -:"$decoded_name" - \
-              | rclone rcat "$remote_path" --progress
+            if ! cp "$TMP_FILE" "${TMP_DIR}/${ORIGINAL_NAME}"; then
+              echo "❌ Copy failed: $FILE_URL"
+              rm -rf "$TMP_DIR"
+              return 1
+            fi
 
-            echo "✅ Finished #${COUNTER} – $zip_name uploaded"
-          done <<< "$URLS"
+            if ! (cd "$TMP_DIR" && zip -j -q "$TMP_ZIP" "$ORIGINAL_NAME"); then
+              echo "❌ Zip creation failed: $FILE_URL"
+              rm -rf "$TMP_DIR"
+              return 1
+            fi
 
-          echo "🎉 All URLs processed successfully"
+            if [[ ! -s "$TMP_ZIP" ]]; then
+              echo "❌ Zip creation failed – file is empty: $FILE_URL"
+              rm -rf "$TMP_DIR"
+              return 1
+            fi
+
+            # 3️⃣ העלאה ל‑Google Drive
+            echo "🚀 Uploading ZIP to Drive: $DEST_PATH"
+            if ! rclone copy "$TMP_ZIP" "$DEST_PATH" --progress; then
+              echo "❌ Upload failed: $DEST_PATH"
+              rm -rf "$TMP_DIR"
+              return 1
+            fi
+
+            rm -rf "$TMP_DIR"
+            echo "✅ Finished – ZIP uploaded successfully: $DEST_PATH"
+          }
+
+          export -f upload_one
+
+          xargs -d '\n' -P "$PARALLEL_JOBS" -n 1 bash -c 'upload_one "$1"' _ < "$MANIFEST_FILE"
