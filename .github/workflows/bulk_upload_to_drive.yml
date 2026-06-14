@@ -1,23 +1,29 @@
-name: Bulk upload URLs → Google Drive (ZIP per URL)
+name: Bulk upload URLs → Google Drive (one ZIP per URL)
 
-# אפשר להריץ ידנית, או להפעיל אוטומטית על‑פי שינוי קובץ ה‑repo
+# אפשר להפעיל ידנית או באופן אוטומטי כשהקובץ urls.txt מתעדכן
 on:
-  workflow_dispatch:                     # הפעלה ידנית
+  workflow_dispatch:                     # הרצה ידנית
   push:
     paths:
-      - 'bulk/urls.txt'                  # כשמתעדכן קובץ הקלט – ה‑workflow רץ אוטומטית
+      - 'bulk/urls.txt'                  # שינוי בקובץ → ריצה אוטומטית
 
 jobs:
   bulk-upload:
     runs-on: ubuntu-latest
+    env:
+      # תיקיית ה‑Drive שאליה יועלו הקבצים (אפשר לשנות מה‑UI גם)
+      DEST_FOLDER: MyUploads
     steps:
       # --------------------------------------------------------------
-      # 0️⃣  הגדרת סביבה – rclone + קובץ קונפיג
+      # 0️⃣  התקנת rclone (zip, curl, mktemp כבר במערכת)
       # --------------------------------------------------------------
       - name: Install rclone
         run: |
           curl https://rclone.org/install.sh | sudo bash
 
+      # --------------------------------------------------------------
+      # 1️⃣  קובץ קונפיג ל‑rclone (remote בשם gdrive)
+      # --------------------------------------------------------------
       - name: Write rclone config
         env:
           RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
@@ -31,131 +37,97 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 1️⃣  קבלת קובץ הקלט מה‑repo
+      # 2️⃣  משיכת הקוד (כולל bulk/urls.txt)
       # --------------------------------------------------------------
-      - name: Checkout repository (get urls.txt)
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: 'bulk/urls.txt'   # רק קובץ הקלט
+      - name: Checkout repository
+        uses: actions/checkout@v4   # מושך את כל המאגר – קובץ urls.txt יהיה כאן
 
       # --------------------------------------------------------------
-      # 2️⃣  קריאת הקובץ והכנת לולאה
+      # 3️⃣  לולאה על כל השורות של bulk/urls.txt
       # --------------------------------------------------------------
-      - name: Process each line
-        id: loop
+      - name: Process every URL and upload as ZIP
         env:
-          INPUT_FILE: bulk/urls.txt            # שם הקובץ במאגר
-          DEST_FOLDER: MyUploads               # תת‑התאם לפי הצורך
+          DEST_FOLDER: ${{ env.DEST_FOLDER }}
         run: |
           set -e
           set -o pipefail
 
-          # נוודא שהקובץ קיים
+          INPUT_FILE="bulk/urls.txt"
+
           if [[ ! -f "$INPUT_FILE" ]]; then
-            echo "❌ INPUT FILE $INPUT_FILE not found"
+            echo "❌ קובץ הקלט $INPUT_FILE אינו קיים"
             exit 1
           fi
 
-          # ניצור קובץ זמני שבו נכתוב את הפקודות שיבוצעו לכל שורה
-          # (זה מאפשר לנו להשתמש ב‑`set -e` ולראות קוד שגיאה במידה ומשהו נכשל)
-          CMD_FILE=$(mktemp)
-          echo "#!/usr/bin/env bash" > "$CMD_FILE"
-          echo "set -e" >> "$CMD_FILE"
-          echo "set -o pipefail" >> "$CMD_FILE"
-
-          # ---------------------------------------------------------
-          # פונקציית עזר – בונה שם ZIP ו‑internal‑name עבור שורה אחת
-          # ---------------------------------------------------------
-          cat <<'EOF' >> "$CMD_FILE"
+          # פונקציה שמטפלת ב‑URL אחד
           process_one() {
             local url="$1"
             local custom_name="$2"
-            local dest_folder="${DEST_FOLDER}"   # משתנה סביבתי מה‑step
 
-            # ---- 1️⃣ שם הקובץ מה‑URL (decoded) ----
+            # ---------- 1️⃣ שם הקובץ מה‑URL ----------
             raw_name=$(basename "$url")
-            raw_name=${raw_name%%\?*}
+            raw_name=${raw_name%%\?*}                     # חותך ?query אם קיים
             decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
+            echo "🔤 Decoded name from URL = $decoded_name"
 
-            # ---- 2️⃣ basename של ZIP (אם קיבלנו custom_name) ----
+            # ---------- 2️⃣ basename של קובץ ה‑ZIP ----------
             if [[ -n "$custom_name" ]]; then
               base_name="$custom_name"
             else
-              base_name="${decoded_name%.*}"   # מסיר סיומת קיימת
+              base_name="${decoded_name%.*}"               # מסיר סיומת (אם יש)
             fi
-
             zip_name="${base_name}.zip"
             internal_name="$decoded_name"
 
-            echo "🔧 Processing URL: $url"
-            echo "   ZIP name on Drive : $zip_name"
-            echo "   Internal name    : $internal_name"
+            echo "📦 ZIP name that will be created = $zip_name"
+            echo "📁 Internally stored file name  = $internal_name"
 
-            # ---- 3️⃣ שמות קבצים זמניים ----
+            # ---------- 3️⃣ work‑dir זמני ----------
             work_dir=$(mktemp -d)
             src_file="${work_dir}/downloaded"
             zip_file="${work_dir}/${zip_name}"
 
-            # ---- 4️⃣ הורדה ----
+            # ---------- 4️⃣ הורדה ----------
+            echo "⬇️ Downloading $url → $src_file"
             curl -L -s -o "$src_file" "$url"
             if [[ ! -s "$src_file" ]]; then
-              echo "❌ Download failed or empty for $url"
+              echo "❌ הורדה נכשלה או שהקובץ ריק – $url"
               exit 1
             fi
 
-            # ---- 5️⃣ יצירת ZIP (ה‑internal‑name נשמר) ----
+            # ---------- 5️⃣ יצירת ZIP ----------
             cp "$src_file" "${work_dir}/${internal_name}"
             (cd "$work_dir" && zip -j -q "$zip_file" "$internal_name")
             if [[ ! -s "$zip_file" ]]; then
-              echo "❌ Zip creation failed for $url"
+              echo "❌ יצירת ZIP נכשלה – $zip_name"
               exit 1
             fi
 
-            # ---- 6️⃣ העלאה ל‑Drive ----
-            remote_path="gdrive:${dest_folder}/${zip_name}"
+            # ---------- 6️⃣ העלאה ל‑Drive ----------
+            remote_path="gdrive:${DEST_FOLDER}/${zip_name}"
             echo "🚀 Uploading $zip_name → $remote_path"
             rclone copy "$zip_file" "$remote_path" --progress
 
             # ניקוי זמני
             rm -rf "$work_dir"
           }
-          EOF
 
-          # ---------------------------------------------------------
-          # קריאת הקובץ והוספת קריאות לפונקציה לתוך ה‑script
-          # ---------------------------------------------------------
+          # -------------------------------------------------
+          # קריאה לפונקציה על‑פי כל שורה בקובץ
+          # -------------------------------------------------
           line_no=0
           while IFS= read -r line || [[ -n "$line" ]]; do
             ((line_no++))
             # דלג על ריק או על שורות שמתחילות ב‑#
             [[ -z "$line" || "$line" =~ ^# ]] && continue
 
-            # פרק את השורה: URL|opt_name
+            # פצל ל‑URL ו‑optional‑basename
             IFS='|' read -r url opt_name <<< "$line"
-            url=$(echo "$url" | xargs)                 # trim spaces
-            opt_name=$(echo "$opt_name" | xargs)       # trim spaces (יכול להיות ריק)
+            url=$(echo "$url" | xargs)          # trim spaces
+            opt_name=$(echo "$opt_name" | xargs)   # יכול לשאר ריק
 
-            # הוספת קריאה לפונקציה לקובץ הפקודות
-            echo "process_one \"$url\" \"$opt_name\"" >> "$CMD_FILE"
+            echo "=== מעבד שורה #$line_no ==="
+            process_one "$url" "$opt_name"
           done < "$INPUT_FILE"
 
-          # הפיכת הקובץ לפקודה מבצעת
-          chmod +x "$CMD_FILE"
-          echo "📦 Generated command file: $CMD_FILE"
-          echo "---- BEGIN GENERATED SCRIPT ----"
-          cat "$CMD_FILE"
-          echo "---- END GENERATED SCRIPT ----"
-
-          # נכניס את המזהה של הקובץ לתוך output כדי שנוכל להריץ אותו בשלב הבא
-          echo "cmd_file=$CMD_FILE" >> $GITHUB_OUTPUT
-
-      # --------------------------------------------------------------
-      # 3️⃣  הרצת קובץ הפקודות (ה‑loop) עם כל הקבצים
-      # --------------------------------------------------------------
-      - name: Execute bulk processing script
-        env:
-          DEST_FOLDER: ${{ github.event.inputs.folder || 'MyUploads' }}   # אפשר גם לשנות ב‑dispatch
-        run: |
-          set -e
-          set -o pipefail
-          "${{ steps.loop.outputs.cmd_file }}"
+          echo "✅ כל הקבצים הועלו בהצלחה!"
