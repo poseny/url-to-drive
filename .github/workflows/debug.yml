@@ -18,7 +18,7 @@ jobs:
         run: |
           mkdir -p /tmp/test
           cd /tmp/test
-          yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
+          yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=dQw4w9WgXcQ" 2>&1 | tee /tmp/log.txt
           
           echo "=== EXIT CODE: $? ==="
 
