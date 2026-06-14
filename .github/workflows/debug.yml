@@ -15,7 +15,7 @@ jobs:
         with:
           ref: main
 
-      - name: Run full debug and create logs
+      - name: Install dependencies and create install.log
         if: always()
         run: |
           set +e
@@ -39,42 +39,75 @@ jobs:
           echo "" | tee -a /tmp/install.log
           echo "=== PIP UPGRADE ===" | tee -a /tmp/install.log
 
-          python3 -m pip install --upgrade pip 2>&1 | tee -a /tmp/install.log
-          echo "PIP UPGRADE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
+          python3 -m pip install --user --upgrade pip 2>&1 | tee -a /tmp/install.log
+          PIP_UPGRADE_STATUS=${PIPESTATUS[0]}
+          echo "PIP UPGRADE EXIT CODE: $PIP_UPGRADE_STATUS" | tee -a /tmp/install.log
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "Added $HOME/.local/bin to PATH" | tee -a /tmp/install.log
 
           echo "" | tee -a /tmp/install.log
           echo "=== INSTALL YT-DLP WITH ESO ===" | tee -a /tmp/install.log
 
-          python3 -m pip install --upgrade "yt-dlp[default+ESO]" 2>&1 | tee -a /tmp/install.log
-          echo "YT-DLP INSTALL EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
+          python3 -m pip install --user --upgrade "yt-dlp[default,ESO]" 2>&1 | tee -a /tmp/install.log
+          YT_DLP_INSTALL_STATUS=${PIPESTATUS[0]}
+          echo "YT-DLP INSTALL EXIT CODE: $YT_DLP_INSTALL_STATUS" | tee -a /tmp/install.log
+
+          if [ "$YT_DLP_INSTALL_STATUS" -ne 0 ]; then
+            echo "" | tee -a /tmp/install.log
+            echo "First yt-dlp install failed. Trying fallback: yt-dlp + yt-dlp-ejs" | tee -a /tmp/install.log
+
+            python3 -m pip install --user --upgrade yt-dlp yt-dlp-ejs 2>&1 | tee -a /tmp/install.log
+            YT_DLP_FALLBACK_STATUS=${PIPESTATUS[0]}
+            echo "YT-DLP FALLBACK INSTALL EXIT CODE: $YT_DLP_FALLBACK_STATUS" | tee -a /tmp/install.log
+          fi
 
           echo "" | tee -a /tmp/install.log
           echo "=== INSTALL NODEJS ===" | tee -a /tmp/install.log
 
           sudo apt-get update 2>&1 | tee -a /tmp/install.log
-          echo "APT UPDATE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
+          APT_UPDATE_STATUS=${PIPESTATUS[0]}
+          echo "APT UPDATE EXIT CODE: $APT_UPDATE_STATUS" | tee -a /tmp/install.log
 
           sudo apt-get install -y nodejs 2>&1 | tee -a /tmp/install.log
-          echo "APT INSTALL NODEJS EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
+          APT_INSTALL_NODEJS_STATUS=${PIPESTATUS[0]}
+          echo "APT INSTALL NODEJS EXIT CODE: $APT_INSTALL_NODEJS_STATUS" | tee -a /tmp/install.log
 
           echo "" | tee -a /tmp/install.log
           echo "=== VERSIONS ===" | tee -a /tmp/install.log
 
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "PATH=$PATH" | tee -a /tmp/install.log
+
           node --version 2>&1 | tee -a /tmp/install.log
           echo "NODE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
 
-          yt-dlp --version 2>&1 | tee -a /tmp/install.log
+          YTDLP=(python3 -m yt_dlp)
+
+          "${YTDLP[@]}" --version 2>&1 | tee -a /tmp/install.log
           echo "YT-DLP VERSION EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
 
           echo "" | tee -a /tmp/install.log
           echo "=== CHECK COOKIES FILE ===" | tee -a /tmp/install.log
 
-          if [ -f "$GITHUB_WORKSPACE/cookies_new.txt" ]; then
+          COOKIE_FILE="$GITHUB_WORKSPACE/cookies_new.txt"
+
+          if [ -f "$COOKIE_FILE" ]; then
             echo "cookies_new.txt found" | tee -a /tmp/install.log
-            ls -l "$GITHUB_WORKSPACE/cookies_new.txt" | tee -a /tmp/install.log
-            wc -c "$GITHUB_WORKSPACE/cookies_new.txt" | tee -a /tmp/install.log
+            echo "COOKIE_FILE=$COOKIE_FILE" | tee -a /tmp/install.log
+            ls -l "$COOKIE_FILE" | tee -a /tmp/install.log
+            wc -c "$COOKIE_FILE" | tee -a /tmp/install.log
+          elif [ -f "$GITHUB_WORKSPACE/www.youtube.com_cookies.txt" ]; then
+            echo "cookies_new.txt not found, using www.youtube.com_cookies.txt" | tee -a /tmp/install.log
+            COOKIE_FILE="$GITHUB_WORKSPACE/www.youtube.com_cookies.txt"
+            echo "COOKIE_FILE=$COOKIE_FILE" | tee -a /tmp/install.log
+            ls -l "$COOKIE_FILE" | tee -a /tmp/install.log
+            wc -c "$COOKIE_FILE" | tee -a /tmp/install.log
           else
-            echo "ERROR: cookies_new.txt not found at $GITHUB_WORKSPACE/cookies_new.txt" | tee -a /tmp/install.log
+            echo "ERROR: no cookies file found" | tee -a /tmp/install.log
+            echo "Checked:" | tee -a /tmp/install.log
+            echo "$GITHUB_WORKSPACE/cookies_new.txt" | tee -a /tmp/install.log
+            echo "$GITHUB_WORKSPACE/www.youtube.com_cookies.txt" | tee -a /tmp/install.log
           fi
 
           mkdir -p /tmp/test
@@ -83,25 +116,26 @@ jobs:
           echo "" | tee /tmp/list_formats.txt
           echo "=== LIST FORMATS ===" | tee -a /tmp/list_formats.txt
 
-          yt-dlp --version 2>&1 | tee -a /tmp/list_formats.txt
+          "${YTDLP[@]}" --version 2>&1 | tee -a /tmp/list_formats.txt
           echo "YT-DLP VERSION EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/list_formats.txt
 
-          yt-dlp \
-            --cookies "$GITHUB_WORKSPACE/cookies_new.txt" \
+          "${YTDLP[@]}" \
+            --cookies "$COOKIE_FILE" \
             --extractor-args "youtube:player_client=web" \
             --skip-download \
             --list-formats \
             "https://www.youtube.com/watch?v=I60j6jur_TY" \
             2>&1 | tee -a /tmp/list_formats.txt
 
+          FORMAT_STATUS=${PIPESTATUS[0]}
           echo "" | tee -a /tmp/list_formats.txt
-          echo "=== FORMAT EXIT CODE: ${PIPESTATUS[0]} ===" | tee -a /tmp/list_formats.txt
+          echo "=== FORMAT EXIT CODE: $FORMAT_STATUS ===" | tee -a /tmp/list_formats.txt
 
           echo "" > /tmp/log.txt
           echo "=== DOWNLOAD ===" | tee -a /tmp/log.txt
 
-          yt-dlp \
-            --cookies "$GITHUB_WORKSPACE/cookies_new.txt" \
+          "${YTDLP[@]}" \
+            --cookies "$COOKIE_FILE" \
             --extractor-args "youtube:player_client=web" \
             --no-playlist \
             -f "bestaudio/best" \
@@ -109,8 +143,9 @@ jobs:
             "https://www.youtube.com/watch?v=I60j6jur_TY" \
             2>&1 | tee -a /tmp/log.txt
 
+          DOWNLOAD_STATUS=${PIPESTATUS[0]}
           echo "" | tee -a /tmp/log.txt
-          echo "=== DOWNLOAD EXIT CODE: ${PIPESTATUS[0]} ===" | tee -a /tmp/log.txt
+          echo "=== DOWNLOAD EXIT CODE: $DOWNLOAD_STATUS ===" | tee -a /tmp/log.txt
 
       - name: Send email
         if: always()
