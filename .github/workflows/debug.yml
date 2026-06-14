@@ -1,26 +1,137 @@
-- name: Debug formats
-  run: |
-    mkdir -p /tmp/test
-    cd /tmp/test
+name: Debug Cookies V2
 
-    echo "=== YT-DLP VERSION ==="
-    yt-dlp --version
+on:
+  workflow_dispatch:
 
-    echo "=== NODE VERSION ==="
-    node --version
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-    echo "=== LIST FORMATS ==="
-    yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --extractor-args "youtube:player_client=web" --skip-download --list-formats "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/list_formats.txt
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --upgrade "yt-dlp[default+ESO]"
+          sudo apt-get update
+          sudo apt-get install -y nodejs
 
-    echo "=== FORMAT EXIT CODE: ${PIPESTATUS[0]} ==="
+          echo "=== NODE VERSION ==="
+          node --version
 
-- name: Download with cookies
-  continue-on-error: true
-  run: |
-    mkdir -p /tmp/test
-    cd /tmp/test
+          echo "=== YT-DLP VERSION ==="
+          yt-dlp --version
 
-    echo "=== DOWNLOAD ==="
-    yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --extractor-args "youtube:player_client=web" --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
+      - name: Check cookies file
+        run: |
+          echo "=== CHECK COOKIES FILE ==="
 
-    echo "=== DOWNLOAD EXIT CODE: ${PIPESTATUS[0]} ==="
+          if [ -f "$GITHUB_WORKSPACE/cookies_new.txt" ]; then
+            echo "cookies_new.txt found"
+            ls -l "$GITHUB_WORKSPACE/cookies_new.txt"
+          else
+            echo "ERROR: cookies_new.txt not found at $GITHUB_WORKSPACE/cookies_new.txt"
+          fi
+
+      - name: Debug formats
+        continue-on-error: true
+        run: |
+          set +e
+
+          mkdir -p /tmp/test
+          cd /tmp/test
+
+          echo "=== YT-DLP VERSION ===" | tee /tmp/list_formats.txt
+          yt-dlp --version | tee -a /tmp/list_formats.txt
+
+          echo "" | tee -a /tmp/list_formats.txt
+          echo "=== NODE VERSION ===" | tee -a /tmp/list_formats.txt
+          node --version | tee -a /tmp/list_formats.txt
+
+          echo "" | tee -a /tmp/list_formats.txt
+          echo "=== LIST FORMATS ===" | tee -a /tmp/list_formats.txt
+
+          yt-dlp \
+            --cookies "$GITHUB_WORKSPACE/cookies_new.txt" \
+            --extractor-args "youtube:player_client=web" \
+            --skip-download \
+            --list-formats \
+            "https://www.youtube.com/watch?v=I60j6jur_TY" \
+            2>&1 | tee -a /tmp/list_formats.txt
+
+          echo "" | tee -a /tmp/list_formats.txt
+          echo "=== FORMAT EXIT CODE: ${PIPESTATUS[0]} ===" | tee -a /tmp/list_formats.txt
+
+      - name: Download with cookies
+        continue-on-error: true
+        run: |
+          set +e
+
+          mkdir -p /tmp/test
+          cd /tmp/test
+
+          echo "=== DOWNLOAD ===" | tee /tmp/log.txt
+
+          yt-dlp \
+            --cookies "$GITHUB_WORKSPACE/cookies_new.txt" \
+            --extractor-args "youtube:player_client=web" \
+            --no-playlist \
+            -f "bestaudio/best" \
+            -o "test.%(ext)s" \
+            "https://www.youtube.com/watch?v=I60j6jur_TY" \
+            2>&1 | tee -a /tmp/log.txt
+
+          echo "" | tee -a /tmp/log.txt
+          echo "=== DOWNLOAD EXIT CODE: ${PIPESTATUS[0]} ===" | tee -a /tmp/log.txt
+
+      - name: Send email
+        if: always()
+        env:
+          EMAIL_FROM: p0556722432@gmail.com
+          EMAIL_TO: p0556722432@gmail.com
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        run: |
+          python3 << 'EOF'
+          import smtplib
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+          import os
+
+          log_content = ""
+
+          paths = [
+              "/tmp/log.txt",
+              "/tmp/list_formats.txt"
+          ]
+
+          for path in paths:
+              if os.path.exists(path):
+                  with open(path, "r") as f:
+                      log_content += f"\n\n========== {path} ==========\n"
+                      log_content += f.read()
+              else:
+                  log_content += f"\n\n========== {path} MISSING ==========\n"
+
+          msg = MIMEMultipart()
+          msg["From"] = os.environ["EMAIL_FROM"]
+          msg["To"] = os.environ["EMAIL_TO"]
+          msg["Subject"] = "YouTube Debug Log V2"
+
+          msg.attach(MIMEText(log_content, "plain"))
+
+          try:
+              server = smtplib.SMTP("smtp.gmail.com", 587)
+              server.starttls()
+              server.login(os.environ["EMAIL_FROM"], os.environ["EMAIL_PASSWORD"])
+              server.sendmail(
+                  os.environ["EMAIL_FROM"],
+                  os.environ["EMAIL_TO"],
+                  msg.as_string()
+              )
+              server.quit()
+              print("EMAIL SENT")
+          except Exception as e:
+              print(f"EMAIL FAILED: {e}")
+          EOF
