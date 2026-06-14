@@ -1,6 +1,6 @@
 name: Upload URL → Google Drive (no zip – media or links.txt)
 
-# הרצה ידנית מה‑UI של GitHub
+# מאפשר הרצה ידנית מה‑UI של GitHub
 on:
   workflow_dispatch:
     inputs:
@@ -22,13 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # --------------------------------------------------------------
-      # 0️⃣  Checkout – רק כדי שה‑UI של GitHub יראה את ה‑workflow
+      # 0️⃣  Checkout – נדרש רק כדי שה‑UI יזהה את ה‑workflow
       # --------------------------------------------------------------
       - name: Checkout repository (required for UI)
         uses: actions/checkout@v3
 
       # --------------------------------------------------------------
-      # 1️⃣  Install rclone + lynx (לצורך חילוץ כותרת HTML)
+      # 1️⃣  Install rclone + lynx (לחלץ כותרת <title> מה‑HTML)
       # --------------------------------------------------------------
       - name: Install rclone and lynx
         run: |
@@ -37,7 +37,7 @@ jobs:
           sudo apt-get install -y lynx
 
       # --------------------------------------------------------------
-      # 2️⃣  רישום הקונפיג של rclone (remote בשם gdrive)
+      # 2️⃣  Write rclone config (remote בשם gdrive)
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
@@ -52,7 +52,7 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣  ניתוח ה‑Content‑Type ובחירת base‑name ל‑קובץ
+      # 3️⃣  Resolve content‑type והקצאת שם בסיס (base name)
       # --------------------------------------------------------------
       - name: Resolve content‑type & base name
         id: resolve
@@ -62,21 +62,21 @@ jobs:
         run: |
           set -e
 
-          # 3.1 – קבלת Content‑Type (ה‑header מה‑שרת)
+          # 3.1 – קבלת Content‑Type מה‑header
           CONTENT_TYPE=$(curl -sI -L "$FILE_URL" | awk -F': ' '/^[Cc]ontent-[Tt]ype/ {print $2}' | tr -d '\r')
-          echo "🕵️ Content‑Type = $CONTENT_TYPE"
+          echo "🕵️‍♂️ Content‑Type = $CONTENT_TYPE"
 
-          # 3.2 – בחירת שם בסיס (Base name) ל‑קובץ/קובץ‑טקסט
+          # 3.2 – בחירת שם בסיס (Base name)
           if [[ -n "$USER_NAME" ]]; then
             BASE_NAME="$USER_NAME"
           else
             if [[ "$CONTENT_TYPE" == text/html* ]]; then
-              # דף HTML – משיגים את כותרת ה‑<title>
+              # דף HTML – חילוץ <title>
               PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin | head -n 1)
               CLEAN_TITLE=$(echo "$PAGE_TITLE" | tr -cd '[:alnum:] _-')
               BASE_NAME="${CLEAN_TITLE:-page}"
             else
-              # קובץ מדיה – שם קובץ מה‑URL (בלי סיומת)
+              # קובץ מדיה – שם קובץ מה‑URL ללא סיומת
               raw_name=$(basename "$FILE_URL")
               raw_name=${raw_name%%\?*}
               BASE_NAME="${raw_name%.*}"
@@ -90,7 +90,7 @@ jobs:
           echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 4️⃣  יצירת תיקייה זמנית לעבודה
+      # 4️⃣  Prepare temporary working directory
       # --------------------------------------------------------------
       - name: Create temporary directory
         id: tmpdir
@@ -99,7 +99,7 @@ jobs:
           echo "tmpdir=$TMPDIR" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 5️⃣  הורדה, חילוץ (אם HTML) ו‑upload ללא zip
+      # 5️⃣  Download / extract / upload (no ZIP)
       # --------------------------------------------------------------
       - name: Download / extract / upload (no zip)
         env:
@@ -113,9 +113,7 @@ jobs:
           set -o pipefail
           cd "$TMPDIR"
 
-          # ==============================================
-          #   קובץ מדיה – ללא דחיסה, העברה ישירה
-          # ==============================================
+          # ---------- קובץ מדיה ----------
           if [[ "$CONTENT_TYPE" != text/html* ]]; then
             echo "📥 Downloading media file → $BASE_NAME"
             curl -L -s -o "$BASE_NAME" "$FILE_URL"
@@ -123,15 +121,13 @@ jobs:
             echo "🚀 Uploading media file directly to Drive"
             rclone copy "$BASE_NAME" "$REMOTE_BASE" --progress
 
-          # ==============================================
-          #   דף HTML – חיפוש קישורים למדיה → links.txt
-          # ==============================================
+          # ---------- דף HTML ----------
           else
             echo "📄 Downloading HTML page"
             curl -L -s -o "page.html" "$FILE_URL"
 
             echo "🔎 Extracting direct‑media links from HTML"
-            # רשימת סיומות למדיה (אפשר להרחיב)
+            # רשימת סיומות למדיה – ניתן להרחיב לפי צורך
             MEDIA_REGEX='https?://[^"]+\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)'
             grep -Eo "$MEDIA_REGEX" "page.html" | sort -u > "links.txt" || true
 
@@ -139,13 +135,12 @@ jobs:
               echo "No direct media links were found on the page." > "links.txt"
             fi
 
-            echo "🚀 Uploading links.txt to Drive"
-            # כאן אנחנו מייצרים שם קובץ על‑Drive: <BASE_NAME>.txt
+            echo "🚀 Uploading links.txt to Drive as ${BASE_NAME}.txt"
             rclone copy "links.txt" "${REMOTE_BASE}.txt" --progress
           fi
 
       # --------------------------------------------------------------
-      # 6️⃣  ניקוי קבצים זמניים (רצת runner תסגור את הכל אוטומטית)
+      # 6️⃣  Clean‑up (runner מוחק /tmp אוטומטית, רק למען בטחון)
       # --------------------------------------------------------------
       - name: Clean temporary files
         if: always()
