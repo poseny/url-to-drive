@@ -1,4 +1,4 @@
-name: Debug Cookies V3
+name: Debug Cookies V4
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 jobs:
   debug:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repo
@@ -39,26 +39,45 @@ jobs:
           echo "" | tee -a /tmp/install.log
           echo "=== PIP UPGRADE ===" | tee -a /tmp/install.log
 
-          python3 -m pip install --user --upgrade pip 2>&1 | tee -a /tmp/install.log
+          python3 -m pip install --user --upgrade --no-cache-dir pip 2>&1 | tee -a /tmp/install.log
           echo "PIP UPGRADE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
 
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "Added $HOME/.local/bin to PATH" | tee -a /tmp/install.log
 
           echo "" | tee -a /tmp/install.log
-          echo "=== INSTALL YT-DLP NIGHTLY + EJS ===" | tee -a /tmp/install.log
+          echo "=== INSTALL YT-DLP + YT-DLP-EJS ===" | tee -a /tmp/install.log
 
-          python3 -m pip install --user --upgrade --pre --upgrade-strategy eager "yt-dlp[default] @ https://pypi.org/simple/yt-dlp/" yt-dlp-ejs 2>&1 | tee -a /tmp/install.log
-          echo "YT-DLP INSTALL EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
+          python3 -m pip install --user --upgrade --no-cache-dir "yt-dlp[default]" 2>&1 | tee -a /tmp/install.log
+          YT_DLP_STATUS=${PIPESTATUS[0]}
+          echo "YT-DLP INSTALL EXIT CODE: $YT_DLP_STATUS" | tee -a /tmp/install.log
+
+          python3 -m pip install --user --upgrade --no-cache-dir yt-dlp-ejs 2>&1 | tee -a /tmp/install.log
+          YT_DLP_EJS_STATUS=${PIPESTATUS[0]}
+          echo "YT-DLP-EJS INSTALL EXIT CODE: $YT_DLP_EJS_STATUS" | tee -a /tmp/install.log
+
+          if [ "$YT_DLP_STATUS" -ne 0 ] || [ "$YT_DLP_EJS_STATUS" -ne 0 ]; then
+            echo "" | tee -a /tmp/install.log
+            echo "First install failed. Trying fallback install with ESO extra." | tee -a /tmp/install.log
+
+            python3 -m pip install --user --upgrade --no-cache-dir "yt-dlp[ESO,default]" yt-dlp-ejs 2>&1 | tee -a /tmp/install.log
+            echo "FALLBACK INSTALL EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
+          fi
 
           echo "" | tee -a /tmp/install.log
-          echo "=== INSTALL NODEJS + FFMPEG ===" | tee -a /tmp/install.log
+          echo "=== INSTALL / CHECK NODEJS ===" | tee -a /tmp/install.log
 
-          sudo apt-get update 2>&1 | tee -a /tmp/install.log
-          echo "APT UPDATE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
+          if ! command -v node >/dev/null 2>&1; then
+            echo "node not found, installing nodejs" | tee -a /tmp/install.log
 
-          sudo apt-get install -y nodejs ffmpeg 2>&1 | tee -a /tmp/install.log
-          echo "APT INSTALL EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
+            sudo apt-get update 2>&1 | tee -a /tmp/install.log
+            echo "APT UPDATE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
+
+            sudo apt-get install -y nodejs 2>&1 | tee -a /tmp/install.log
+            echo "APT INSTALL NODEJS EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
+          else
+            echo "node already installed" | tee -a /tmp/install.log
+          fi
 
           echo "" | tee -a /tmp/install.log
           echo "=== VERSIONS ===" | tee -a /tmp/install.log
@@ -263,7 +282,7 @@ jobs:
           msg = MIMEMultipart()
           msg["From"] = os.environ["EMAIL_FROM"]
           msg["To"] = os.environ["EMAIL_TO"]
-          msg["Subject"] = "YouTube Debug Log V3"
+          msg["Subject"] = "YouTube Debug Log V4"
 
           msg.attach(MIMEText(log_content, "plain"))
 
