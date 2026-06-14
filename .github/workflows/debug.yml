@@ -1,4 +1,4 @@
-name: Debug Cookies V2
+name: Debug Cookies V3
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 jobs:
   debug:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - name: Checkout repo
@@ -40,38 +40,25 @@ jobs:
           echo "=== PIP UPGRADE ===" | tee -a /tmp/install.log
 
           python3 -m pip install --user --upgrade pip 2>&1 | tee -a /tmp/install.log
-          PIP_UPGRADE_STATUS=${PIPESTATUS[0]}
-          echo "PIP UPGRADE EXIT CODE: $PIP_UPGRADE_STATUS" | tee -a /tmp/install.log
+          echo "PIP UPGRADE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
 
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "Added $HOME/.local/bin to PATH" | tee -a /tmp/install.log
 
           echo "" | tee -a /tmp/install.log
-          echo "=== INSTALL YT-DLP WITH ESO ===" | tee -a /tmp/install.log
+          echo "=== INSTALL YT-DLP NIGHTLY + EJS ===" | tee -a /tmp/install.log
 
-          python3 -m pip install --user --upgrade "yt-dlp[default,ESO]" 2>&1 | tee -a /tmp/install.log
-          YT_DLP_INSTALL_STATUS=${PIPESTATUS[0]}
-          echo "YT-DLP INSTALL EXIT CODE: $YT_DLP_INSTALL_STATUS" | tee -a /tmp/install.log
-
-          if [ "$YT_DLP_INSTALL_STATUS" -ne 0 ]; then
-            echo "" | tee -a /tmp/install.log
-            echo "First yt-dlp install failed. Trying fallback: yt-dlp + yt-dlp-ejs" | tee -a /tmp/install.log
-
-            python3 -m pip install --user --upgrade yt-dlp yt-dlp-ejs 2>&1 | tee -a /tmp/install.log
-            YT_DLP_FALLBACK_STATUS=${PIPESTATUS[0]}
-            echo "YT-DLP FALLBACK INSTALL EXIT CODE: $YT_DLP_FALLBACK_STATUS" | tee -a /tmp/install.log
-          fi
+          python3 -m pip install --user --upgrade --pre --upgrade-strategy eager "yt-dlp[default] @ https://pypi.org/simple/yt-dlp/" yt-dlp-ejs 2>&1 | tee -a /tmp/install.log
+          echo "YT-DLP INSTALL EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
 
           echo "" | tee -a /tmp/install.log
-          echo "=== INSTALL NODEJS ===" | tee -a /tmp/install.log
+          echo "=== INSTALL NODEJS + FFMPEG ===" | tee -a /tmp/install.log
 
           sudo apt-get update 2>&1 | tee -a /tmp/install.log
-          APT_UPDATE_STATUS=${PIPESTATUS[0]}
-          echo "APT UPDATE EXIT CODE: $APT_UPDATE_STATUS" | tee -a /tmp/install.log
+          echo "APT UPDATE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
 
-          sudo apt-get install -y nodejs 2>&1 | tee -a /tmp/install.log
-          APT_INSTALL_NODEJS_STATUS=${PIPESTATUS[0]}
-          echo "APT INSTALL NODEJS EXIT CODE: $APT_INSTALL_NODEJS_STATUS" | tee -a /tmp/install.log
+          sudo apt-get install -y nodejs ffmpeg 2>&1 | tee -a /tmp/install.log
+          echo "APT INSTALL EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
 
           echo "" | tee -a /tmp/install.log
           echo "=== VERSIONS ===" | tee -a /tmp/install.log
@@ -82,70 +69,166 @@ jobs:
           node --version 2>&1 | tee -a /tmp/install.log
           echo "NODE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
 
-          YTDLP=(python3 -m yt_dlp)
-
-          "${YTDLP[@]}" --version 2>&1 | tee -a /tmp/install.log
+          python3 -m yt_dlp --version 2>&1 | tee -a /tmp/install.log
           echo "YT-DLP VERSION EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
 
+          python3 - <<'PY' | tee -a /tmp/install.log
+          import importlib.util
+
+          spec = importlib.util.find_spec("yt_dlp_ejs")
+          print("yt_dlp_ejs module:", spec.origin if spec else "NOT FOUND")
+          PY
+
           echo "" | tee -a /tmp/install.log
-          echo "=== CHECK COOKIES FILE ===" | tee -a /tmp/install.log
+          echo "=== COOKIE FILES ===" | tee -a /tmp/install.log
 
-          COOKIE_FILE="$GITHUB_WORKSPACE/cookies_new.txt"
+          COOKIE_FILES=()
 
-          if [ -f "$COOKIE_FILE" ]; then
-            echo "cookies_new.txt found" | tee -a /tmp/install.log
-            echo "COOKIE_FILE=$COOKIE_FILE" | tee -a /tmp/install.log
-            ls -l "$COOKIE_FILE" | tee -a /tmp/install.log
-            wc -c "$COOKIE_FILE" | tee -a /tmp/install.log
-          elif [ -f "$GITHUB_WORKSPACE/www.youtube.com_cookies.txt" ]; then
-            echo "cookies_new.txt not found, using www.youtube.com_cookies.txt" | tee -a /tmp/install.log
-            COOKIE_FILE="$GITHUB_WORKSPACE/www.youtube.com_cookies.txt"
-            echo "COOKIE_FILE=$COOKIE_FILE" | tee -a /tmp/install.log
-            ls -l "$COOKIE_FILE" | tee -a /tmp/install.log
-            wc -c "$COOKIE_FILE" | tee -a /tmp/install.log
-          else
-            echo "ERROR: no cookies file found" | tee -a /tmp/install.log
-            echo "Checked:" | tee -a /tmp/install.log
-            echo "$GITHUB_WORKSPACE/cookies_new.txt" | tee -a /tmp/install.log
-            echo "$GITHUB_WORKSPACE/www.youtube.com_cookies.txt" | tee -a /tmp/install.log
+          if [ -f "$GITHUB_WORKSPACE/cookies_new.txt" ]; then
+            COOKIE_FILES+=("$GITHUB_WORKSPACE/cookies_new.txt")
           fi
 
-          mkdir -p /tmp/test
-          cd /tmp/test
+          if [ -f "$GITHUB_WORKSPACE/www.youtube.com_cookies.txt" ]; then
+            COOKIE_FILES+=("$GITHUB_WORKSPACE/www.youtube.com_cookies.txt")
+          fi
 
-          echo "" | tee /tmp/list_formats.txt
-          echo "=== LIST FORMATS ===" | tee -a /tmp/list_formats.txt
+          if [ ${#COOKIE_FILES[@]} -eq 0 ]; then
+            echo "ERROR: no cookies file found" | tee -a /tmp/install.log
+          else
+            for COOKIE_FILE in "${COOKIE_FILES[@]}"; do
+              echo "Found cookies file:" | tee -a /tmp/install.log
+              echo "$COOKIE_FILE" | tee -a /tmp/install.log
+              ls -l "$COOKIE_FILE" | tee -a /tmp/install.log
+              wc -c "$COOKIE_FILE" | tee -a /tmp/install.log
+            done
+          fi
 
+      - name: Debug formats and download attempts
+        if: always()
+        run: |
+          set +e
+
+          URL="https://www.youtube.com/watch?v=I60j6jur_TY"
+          CLIENTS=(web ios android tv mweb)
+          YTDLP=(python3 -m yt_dlp)
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          COOKIE_FILES=()
+
+          if [ -f "$GITHUB_WORKSPACE/cookies_new.txt" ]; then
+            COOKIE_FILES+=("$GITHUB_WORKSPACE/cookies_new.txt")
+          fi
+
+          if [ -f "$GITHUB_WORKSPACE/www.youtube.com_cookies.txt" ]; then
+            COOKIE_FILES+=("$GITHUB_WORKSPACE/www.youtube.com_cookies.txt")
+          fi
+
+          echo "=== YT-DLP VERSION ===" | tee /tmp/list_formats.txt
           "${YTDLP[@]}" --version 2>&1 | tee -a /tmp/list_formats.txt
           echo "YT-DLP VERSION EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/list_formats.txt
 
+          echo "" | tee -a /tmp/list_formats.txt
+          echo "=== LIST FORMATS WITHOUT COOKIES ===" | tee -a /tmp/list_formats.txt
+
           "${YTDLP[@]}" \
-            --cookies "$COOKIE_FILE" \
+            --force-ipv4 \
             --extractor-args "youtube:player_client=web" \
             --skip-download \
             --list-formats \
-            "https://www.youtube.com/watch?v=I60j6jur_TY" \
+            "$URL" \
             2>&1 | tee -a /tmp/list_formats.txt
 
-          FORMAT_STATUS=${PIPESTATUS[0]}
-          echo "" | tee -a /tmp/list_formats.txt
-          echo "=== FORMAT EXIT CODE: $FORMAT_STATUS ===" | tee -a /tmp/list_formats.txt
+          echo "FORMAT EXIT CODE (NO_COOKIE, web): ${PIPESTATUS[0]}" | tee -a /tmp/list_formats.txt
+
+          if [ ${#COOKIE_FILES[@]} -eq 0 ]; then
+            echo "" | tee -a /tmp/list_formats.txt
+            echo "No cookies files found, skipping cookie-based format checks." | tee -a /tmp/list_formats.txt
+          else
+            for COOKIE_FILE in "${COOKIE_FILES[@]}"; do
+              COOKIE_LABEL="$(basename "$COOKIE_FILE")"
+
+              echo "" | tee -a /tmp/list_formats.txt
+              echo "=== LIST FORMATS COOKIE=$COOKIE_LABEL ===" | tee -a /tmp/list_formats.txt
+
+              for CLIENT in "${CLIENTS[@]}"; do
+                echo "--- CLIENT=$CLIENT ---" | tee -a /tmp/list_formats.txt
+
+                "${YTDLP[@]}" \
+                  --cookies "$COOKIE_FILE" \
+                  --force-ipv4 \
+                  --extractor-args "youtube:player_client=$CLIENT" \
+                  --skip-download \
+                  --list-formats \
+                  "$URL" \
+                  2>&1 | tee -a /tmp/list_formats.txt
+
+                echo "FORMAT EXIT CODE ($COOKIE_LABEL, $CLIENT): ${PIPESTATUS[0]}" | tee -a /tmp/list_formats.txt
+              done
+            done
+          fi
 
           echo "" > /tmp/log.txt
-          echo "=== DOWNLOAD ===" | tee -a /tmp/log.txt
+          echo "=== DOWNLOAD ATTEMPTS ===" | tee -a /tmp/log.txt
+
+          SUCCESS="no"
+
+          echo "--- NO_COOKIE CLIENT=web ---" | tee -a /tmp/log.txt
 
           "${YTDLP[@]}" \
-            --cookies "$COOKIE_FILE" \
+            --force-ipv4 \
             --extractor-args "youtube:player_client=web" \
             --no-playlist \
-            -f "bestaudio/best" \
-            -o "test.%(ext)s" \
-            "https://www.youtube.com/watch?v=I60j6jur_TY" \
+            -f "ba/b" \
+            -o "/tmp/test/test_NO_COOKIE_web.%(ext)s" \
+            "$URL" \
             2>&1 | tee -a /tmp/log.txt
 
-          DOWNLOAD_STATUS=${PIPESTATUS[0]}
-          echo "" | tee -a /tmp/log.txt
-          echo "=== DOWNLOAD EXIT CODE: $DOWNLOAD_STATUS ===" | tee -a /tmp/log.txt
+          NO_COOKIE_STATUS=${PIPESTATUS[0]}
+          echo "DOWNLOAD EXIT CODE (NO_COOKIE, web): $NO_COOKIE_STATUS" | tee -a /tmp/log.txt
+
+          if [ "$NO_COOKIE_STATUS" -eq 0 ]; then
+            echo "NO_COOKIE|web" > /tmp/success.txt
+            SUCCESS="yes"
+          fi
+
+          if [ "$SUCCESS" != "yes" ] && [ ${#COOKIE_FILES[@]} -gt 0 ]; then
+            for COOKIE_FILE in "${COOKIE_FILES[@]}"; do
+              COOKIE_LABEL="$(basename "$COOKIE_FILE")"
+
+              for CLIENT in "${CLIENTS[@]}"; do
+                echo "--- COOKIE=$COOKIE_LABEL CLIENT=$CLIENT ---" | tee -a /tmp/log.txt
+
+                "${YTDLP[@]}" \
+                  --cookies "$COOKIE_FILE" \
+                  --force-ipv4 \
+                  --extractor-args "youtube:player_client=$CLIENT" \
+                  --no-playlist \
+                  -f "ba/b" \
+                  -o "/tmp/test/test_${COOKIE_LABEL}_${CLIENT}.%(ext)s" \
+                  "$URL" \
+                  2>&1 | tee -a /tmp/log.txt
+
+                STATUS=${PIPESTATUS[0]}
+                echo "DOWNLOAD EXIT CODE ($COOKIE_LABEL, $CLIENT): $STATUS" | tee -a /tmp/log.txt
+
+                if [ "$STATUS" -eq 0 ]; then
+                  echo "$COOKIE_LABEL|$CLIENT" > /tmp/success.txt
+                  SUCCESS="yes"
+                  break 2
+                fi
+              done
+            done
+          fi
+
+          if [ "$SUCCESS" != "yes" ]; then
+            echo "" | tee -a /tmp/log.txt
+            echo "All download attempts failed." | tee -a /tmp/log.txt
+          else
+            echo "" | tee -a /tmp/log.txt
+            echo "SUCCESS:" | tee -a /tmp/log.txt
+            cat /tmp/success.txt | tee -a /tmp/log.txt
+          fi
 
       - name: Send email
         if: always()
@@ -163,7 +246,8 @@ jobs:
           paths = [
               "/tmp/install.log",
               "/tmp/list_formats.txt",
-              "/tmp/log.txt"
+              "/tmp/log.txt",
+              "/tmp/success.txt"
           ]
 
           log_content = ""
@@ -179,7 +263,7 @@ jobs:
           msg = MIMEMultipart()
           msg["From"] = os.environ["EMAIL_FROM"]
           msg["To"] = os.environ["EMAIL_TO"]
-          msg["Subject"] = "YouTube Debug Log V2"
+          msg["Subject"] = "YouTube Debug Log V3"
 
           msg.attach(MIMEText(log_content, "plain"))
 
