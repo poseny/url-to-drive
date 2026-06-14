@@ -1,76 +1,26 @@
-name: Debug Cookies V2
+- name: Debug formats
+  run: |
+    mkdir -p /tmp/test
+    cd /tmp/test
 
-on:
-  workflow_dispatch:
+    echo "=== YT-DLP VERSION ==="
+    yt-dlp --version
 
-jobs:
-  debug:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    echo "=== NODE VERSION ==="
+    node --version
 
-      - name: Install dependencies
-        run: |
-          python3 -m pip install --upgrade yt-dlp
-          sudo apt-get update
-          sudo apt-get install -y nodejs
+    echo "=== LIST FORMATS ==="
+    yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --extractor-args "youtube:player_client=web" --skip-download --list-formats "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/list_formats.txt
 
-      - name: Debug formats
-        run: |
-          mkdir -p /tmp/test
-          cd /tmp/test
+    echo "=== FORMAT EXIT CODE: ${PIPESTATUS[0]} ==="
 
-          echo "=== YT-DLP VERSION ==="
-          yt-dlp --version
+- name: Download with cookies
+  continue-on-error: true
+  run: |
+    mkdir -p /tmp/test
+    cd /tmp/test
 
-          echo "=== LIST FORMATS ==="
-          yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --skip-download --list-formats "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/list_formats.txt
+    echo "=== DOWNLOAD ==="
+    yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --extractor-args "youtube:player_client=web" --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
 
-      - name: Download with cookies
-        continue-on-error: true
-        run: |
-          mkdir -p /tmp/test
-          cd /tmp/test
-
-          echo "=== DOWNLOAD ==="
-          yt-dlp --cookies "$GITHUB_WORKSPACE/cookies_new.txt" --no-playlist -f "bestaudio/best" -o "test.%(ext)s" "https://www.youtube.com/watch?v=I60j6jur_TY" 2>&1 | tee /tmp/log.txt
-
-          echo "=== EXIT CODE: ${PIPESTATUS[0]} ==="
-
-      - name: Send email
-        env:
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        run: |
-          python3 << 'EOF'
-          import smtplib
-          from email.mime.text import MIMEText
-          from email.mime.multipart import MIMEMultipart
-          import os
-
-          log_content = ""
-
-          for path in ['/tmp/log.txt', '/tmp/list_formats.txt']:
-              if os.path.exists(path):
-                  with open(path, 'r') as f:
-                      log_content += f"\n\n========== {path} ==========\n"
-                      log_content += f.read()
-
-          msg = MIMEMultipart()
-          msg['From'] = 'p0556722432@gmail.com'
-          msg['To'] = 'p0556722432@gmail.com'
-          msg['Subject'] = 'YouTube Debug Log V2'
-
-          msg.attach(MIMEText(log_content, 'plain'))
-
-          try:
-              server = smtplib.SMTP('smtp.gmail.com', 587)
-              server.starttls()
-              server.login('p0556722432@gmail.com', os.environ['EMAIL_PASSWORD'])
-              server.sendmail('p0556722432@gmail.com', 'p0556722432@gmail.com', msg.as_string())
-              server.quit()
-              print("EMAIL SENT")
-          except Exception as e:
-              print(f"EMAIL FAILED: {e}")
-          EOF
+    echo "=== DOWNLOAD EXIT CODE: ${PIPESTATUS[0]} ==="
