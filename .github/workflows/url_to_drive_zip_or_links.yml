@@ -1,11 +1,11 @@
-name: Upload URL → Drive (ZIP – raw file or extracted media links)
+name: Upload URL → Google Drive (ZIP – media‑links for HTML pages)
 
-# הרצה ידנית עם שלושה קלטים
+# הפעלה ידנית דרך GitHub UI
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "כתובת URL (קובץ מדיה או דף HTML)"
+        description: "כתובת URL של הקובץ או דף האינטרנט"
         required: true
         default: "https://commons.wikimedia.org/wiki/File:Bilby_Looking_for_food_at_night.webm"
       folder:
@@ -13,9 +13,7 @@ on:
         required: true
         default: "MyUploads"
       filename:
-        description: |
-          שם קובץ לפני .zip (רק לשימוש אם אינך רוצה שה‑ZIP יקבל את שם הקובץ המקורי).
-          אם ריק – ייקח מה‑URL או מכותרת הדף במקרה של HTML.
+        description: "שם קובץ לבסיס (בלי סיומת). אם ריק – יורד מה‑URL/כותרת הדף"
         required: false
         default: ""
 
@@ -24,14 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # --------------------------------------------------------------
-      # 1️⃣  התקנת rclone (zip, curl, python3 & pip כבר קיימים במערכת)
+      # 1️⃣ Install rclone (zip, curl, grep – כבר במערכת)
       # --------------------------------------------------------------
       - name: Install rclone
         run: |
           curl https://rclone.org/install.sh | sudo bash
 
       # --------------------------------------------------------------
-      # 2️⃣  כתיבת קונפיג של rclone (remote בשם gdrive)
+      # 2️⃣ Write rclone config (remote בשם gdrive)
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
@@ -46,210 +44,127 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣  האם ה‑URL הוא קובץ מדיה או דף HTML?
+      # 3️⃣ Determine the “base name” (for ZIP) and content type
       # --------------------------------------------------------------
-      - name: Detect content type
-        id: content
+      - name: Resolve base name & content type
+        id: resolve
         env:
-          URL: ${{ github.event.inputs.url }}
-        run: |
-          set -e
-          # בקשת HEAD רק לקבלת ה‑Content‑Type
-          CT=$(curl -sI "$URL" | tr -d '\r' | awk -F': ' '/^Content-Type/ {print $2}' | cut -d';' -f1 | tr '[:upper:]' '[:lower:]')
-          echo "Detected Content‑Type = $CT"
-          if [[ "$CT" == "text/html" ]]; then
-            echo "is_html=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_html=false" >> $GITHUB_OUTPUT
-          fi
-
-      # --------------------------------------------------------------
-      # 4️⃣  הגדרת שמות הקבצים – שם ZIP ו‑internal‑name
-      # --------------------------------------------------------------
-      - name: Determine output names
-        id: names
-        env:
-          URL: ${{ github.event.inputs.url }}
+          FILE_URL: ${{ github.event.inputs.url }}
           USER_NAME: ${{ github.event.inputs.filename }}
-          IS_HTML: ${{ steps.content.outputs.is_html }}
         run: |
           set -e
 
-          # 4.1 – שם קובץ מה‑URL (ללא query‑string)
-          raw_name=$(basename "$URL")
-          raw_name=${raw_name%%\?*}
-          decoded_name=$(printf '%b' "$(echo -e "${raw_name//%/\\x}")")
+          # ----- 3.1 – קבלת ה‑Content‑Type מה‑header -----
+          CONTENT_TYPE=$(curl -sI -L "$FILE_URL" | awk -F': ' '/^[Cc]ontent-[Tt]ype/ {print $2}' | tr -d '\r')
+          echo "🕵️ Content‑Type = $CONTENT_TYPE"
 
-          # 4.2 – אם לקוח ערך filename – נשתמש בו,
-          #     אחרת:
-          #       • עבור HTML  – נשתמש בשם הדף (title) או “page”
-          #       • עבור קובץ מדיה – נשתמש בשם הקובץ בלי סיומת
+          # ----- 3.2 – שם בסיס ל‑ZIP --------------------
+          #   אם קיבלנו שם ממשתמש → משתמשים בו.
+          #   אחרת נשתמש בכותרת הדף אם זו HTML,
+          #   או בשם הקובץ מה‑URL אם זה קובץ מדיה.
           if [[ -n "$USER_NAME" ]]; then
-            base_name="$USER_NAME"
+            BASE_NAME="$USER_NAME"
           else
-            if [[ "${{ steps.content.outputs.is_html }}" == "true" ]]; then
-              # נחלץ שם כותרת מה‑HTML במקביל (יהיה זמין מאוחר יותר)
-              base_name="page"
+            if [[ "$CONTENT_TYPE" == text/html* ]]; then
+              # נשלוף את כותרת ה‑<title> – ישתמש ב‑lynx (קיים ב‑ubuntu‑latest)
+              PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin | head -n 1 | tr -d '\n')
+              # ניקוי תווים אסורים בקבצים
+              CLEAN_TITLE=$(echo "$PAGE_TITLE" | tr -cd '[:alnum:] _-')
+              BASE_NAME="${CLEAN_TITLE:-page}"
             else
-              base_name="${decoded_name%.*}"   # מוחק סיומת אם יש
+              # קובץ מדיה – ניקוי שם מה‑URL
+              raw_name=$(basename "$FILE_URL")
+              raw_name=${raw_name%%\?*}
+              BASE_NAME="${raw_name%.*}"
             fi
           fi
 
-          zip_name="${base_name}.zip"
-          echo "📦 ZIP name on Drive = $zip_name"
-          echo "zip_name=$zip_name" >> $GITHUB_OUTPUT
+          echo "🔤 Base name for ZIP = $BASE_NAME"
 
-          # שמירת נתיבים זמניים (לאחר השלב הבא ניצור קבצים בתיקייה זמנית)
-          echo "tmp_dir=$(mktemp -d)" >> $GITHUB_OUTPUT
+          ZIP_NAME="${BASE_NAME}.zip"
+          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
+          echo "content_type=$CONTENT_TYPE" >> $GITHUB_OUTPUT
+          echo "base_name=$BASE_NAME" >> $GITHUB_OUTPUT
+          # נתיב על‑Drive
+          echo "remote_path=gdrive:${{ github.event.inputs.folder }}/$ZIP_NAME" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 5️⃣  טיפול ב‑HTML – חילוץ קישורים ל‑links.txt
+      # 4️⃣ Create a temporary working directory
       # --------------------------------------------------------------
-      - name: Extract media links from HTML (if needed)
-        if: steps.content.outputs.is_html == 'true'
+      - name: Create temp directory
+        id: tmpdir
+        run: |
+          TMPDIR=$(mktemp -d)
+          echo "tmpdir=$TMPDIR" >> $GITHUB_OUTPUT
+
+      # --------------------------------------------------------------
+      # 5️⃣ Download & (if HTML) extract media links → create ZIP
+      # --------------------------------------------------------------
+      - name: Download / extract / zip
         env:
-          URL: ${{ github.event.inputs.url }}
-          TMP_DIR: ${{ steps.names.outputs.tmp_dir }}
+          FILE_URL: ${{ github.event.inputs.url }}
+          CONTENT_TYPE: ${{ steps.resolve.outputs.content_type }}
+          BASE_NAME: ${{ steps.resolve.outputs.base_name }}
+          ZIP_NAME: ${{ steps.resolve.outputs.zip_name }}
+          TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
         run: |
           set -e
-          PAGE_HTML="${TMP_DIR}/page.html"
-          LINKS_TXT="${TMP_DIR}/links.txt"
+          set -o pipefail
 
-          echo "⬇️  Downloading HTML page → $PAGE_HTML"
-          curl -L -s "$URL" -o "$PAGE_HTML"
+          cd "$TMPDIR"
 
-          # אם הכותרת (title) קיימת, נעדכן את שם הקובץ BASE‑NAME
-          TITLE=$(python3 - <<PY
-import sys, re, html
-html_content = open("$PAGE_HTML", encoding="utf-8").read()
-m = re.search(r"<title[^>]*>(.*?)</title>", html_content, re.IGNORECASE|re.DOTALL)
-if m:
-    print(html.unescape(m.group(1)).strip())
-PY
-          )
-          if [[ -n "$TITLE" ]]; then
-            # הפיכת שם קובץ למאורך סביר וללא תווים אסורים
-            SAFE=$(echo "$TITLE" | tr -cd '[:alnum:] _-')
-            SAFE=${SAFE// /_}
-            if [[ -n "$SAFE" ]]; then
-              echo "✅  Page title found – will rename ZIP to '${SAFE}.zip'"
-              echo "zip_name=${SAFE}.zip" >> $GITHUB_OUTPUT
-            fi
-          fi
+          # ---------- 5.1 – קובץ מדיה רגיל ----------
+          if [[ "$CONTENT_TYPE" != text/html* ]]; then
+            echo "📥 Downloading binary media → $BASE_NAME"
+            curl -L -s -o "$BASE_NAME" "$FILE_URL"
 
-          echo "🔎  Extracting media URLs → $LINKS_TXT"
-          python3 - <<'PY' "$URL" "$PAGE_HTML" "$LINKS_TXT"
-import sys, re, os
-from urllib.parse import urljoin, urlparse
-
-base_url, html_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
-
-with open(html_path, encoding="utf-8") as f:
-    html = f.read()
-
-# Patterns שדוחים תגים ריקים ומחפשים src / href / data‑src
-PATTERNS = [
-    r'<img[^>]+src\s*=\s*["\']([^"\']+)["\']',
-    r'<video[^>]+src\s*=\s*["\']([^"\']+)["\']',
-    r'<source[^>]+src\s*=\s*["\']([^"\']+)["\']',
-    r'<audio[^>]+src\s*=\s*["\']([^"\']+)["\']',
-    r'<iframe[^>]+src\s*=\s*["\']([^"\']+)["\']',
-    r'<a[^>]+href\s*=\s*["\']([^"\']+)["\']',
-]
-
-found = set()
-for pat in PATTERNS:
-    for m in re.findall(pat, html, flags=re.IGNORECASE):
-        # אם הקישור הוא יחסית – מצרפים ל‑base_url
-        absolute = urljoin(base_url, m)
-        # מסננים פרוטוקולים אחרים (mailto:, javascript:, #)
-        if absolute.startswith('http://') or absolute.startswith('https://'):
-            found.add(absolute)
-
-# כתיבה לקובץ – אחת לשורה, ממוינת אלפביתית לנוחות
-with open(out_path, "w", encoding="utf-8") as out:
-    for link in sorted(found):
-        out.write(link + "\n")
-PY
-
-          # במידה ולא נמצא שום קישור, נכתוב הודעה ברורה
-          if [[ ! -s "$LINKS_TXT" ]]; then
-            echo "⚠️  No media links detected – writing placeholder text"
-            echo "No media links found on the page." > "$LINKS_TXT"
-          fi
-
-      # --------------------------------------------------------------
-      # 6️⃣  טיפול בקבצים מדיה רגילים (לא HTML)
-      # --------------------------------------------------------------
-      - name: Download raw media file (if not HTML)
-        if: steps.content.outputs.is_html != 'true'
-        env:
-          URL: ${{ github.event.inputs.url }}
-          TMP_DIR: ${{ steps.names.outputs.tmp_dir }}
-        run: |
-          set -e
-          RAW_FILE="${TMP_DIR}/media.bin"
-          echo "⬇️  Downloading media file → $RAW_FILE"
-          curl -L -s "$URL" -o "$RAW_FILE"
-
-          # שמירת שם הקובץ המקורי (ה‑internal_name) כדי שיודבק בתוך ה‑ZIP
-          ORIGINAL_NAME=$(basename "$URL")
-          ORIGINAL_NAME=${ORIGINAL_NAME%%\?*}
-          echo "original_name=$ORIGINAL_NAME" >> $GITHUB_ENV
-
-      # --------------------------------------------------------------
-      # 7️⃣  יצירת ZIP (תלוי אם זה HTML או קובץ מדיה)
-      # --------------------------------------------------------------
-      - name: Create ZIP (HTML‑links OR raw media)
-        env:
-          TMP_DIR: ${{ steps.names.outputs.tmp_dir }}
-          ZIP_NAME: ${{ steps.names.outputs.zip_name }}
-          IS_HTML: ${{ steps.content.outputs.is_html }}
-          # במידה וקובץ מדיה – שם הפנימי הוא שם הקובץ המקורי
-          ORIGINAL_NAME: ${{ env.original_name }}
-        run: |
-          set -e
-
-          ZIP_PATH="${TMP_DIR}/${ZIP_NAME}"
-          echo "📦  Creating ZIP at $ZIP_PATH"
-
-          if [[ "$IS_HTML" == "true" ]]; then
-            # קבצים שנוצרו שלב 5 – links.txt (אולי גם title‑based ZIP name)
-            cd "$TMP_DIR"
-            zip -q -j "$ZIP_PATH" links.txt
+            echo "🗜️ Zipping media file"
+            zip -j -q "$ZIP_NAME" "$BASE_NAME"
           else
-            # קובץ מדיה – נזכיר אותו ב‑ZIP תחת שם הקובץ המקורי
-            cd "$TMP_DIR"
-            cp "media.bin" "$ORIGINAL_NAME"
-            zip -q -j "$ZIP_PATH" "$ORIGINAL_NAME"
-            rm "$ORIGINAL_NAME"   # ניקוי קובץ זמני ששימש רק לדחיסה
+            # ---------- 5.2 – דף HTML ----------
+            echo "📄 Downloading HTML page"
+            curl -L -s -o "page.html" "$FILE_URL"
+
+            echo "🔎 Extracting direct‑media links from HTML"
+            # חיפוש קישורים שמסתיימים בסיומת מדיה נפוצה
+            # אפשר להרחיב את הרשימה לפי צורך
+            MEDIA_REGEX='https?://[^"]+\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)'
+            grep -Eo "$MEDIA_REGEX" "page.html" | sort -u > "links.txt" || true
+
+            # אם לא נמצא קישור – נכתוב הודעה ברורה
+            if [[ ! -s "links.txt" ]]; then
+              echo "No direct media links were found on the page." > "links.txt"
+            fi
+
+            echo "🗜️ Zipping the links.txt file"
+            zip -j -q "$ZIP_NAME" "links.txt"
           fi
 
-          # וידוא שה‑ZIP קיים וגודלו >0
-          if [[ ! -s "$ZIP_PATH" ]]; then
-            echo "❌  ZIP creation failed – file empty"
+          # בדיקה – הקובץ ZIP קיים ולא ריק
+          if [[ ! -s "$ZIP_NAME" ]]; then
+            echo "❌ ZIP creation failed – file size is zero"
             exit 1
           fi
-          echo "✅ ZIP created – size: $(stat -c%s "$ZIP_PATH") bytes"
 
       # --------------------------------------------------------------
-      # 8️⃣  העלאה ל‑Google Drive (עם שם ZIP שנקבע)
+      # 6️⃣ Upload the ZIP to Google Drive
       # --------------------------------------------------------------
       - name: Upload ZIP to Drive
         env:
-          DEST_PATH: "gdrive:${{ github.event.inputs.folder }}/${{ steps.names.outputs.zip_name }}"
-          ZIP_PATH: "${{ steps.names.outputs.tmp_dir }}/${{ steps.names.outputs.zip_name }}"
+          REMOTE_PATH: ${{ steps.resolve.outputs.remote_path }}
+          TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
         run: |
           set -e
-          echo "🚀 Uploading $ZIP_PATH → $DEST_PATH"
-          rclone copy "$ZIP_PATH" "$DEST_PATH" --progress
+          cd "$TMPDIR"
+          echo "🚀 Uploading $ZIP_NAME to $REMOTE_PATH"
+          rclone copy "$ZIP_NAME" "$REMOTE_PATH" --progress
 
       # --------------------------------------------------------------
-      # 9️⃣  ניקוי קבצים זמניים (לא חובה – ה‑runner מוחק /tmp בסיום)
+      # 7️⃣ Clean‑up (optional – runner wipes /tmp automatically)
       # --------------------------------------------------------------
-      - name: Clean temporary directory
+      - name: Clean temporary files
         if: always()
         env:
-          TMP_DIR: ${{ steps.names.outputs.tmp_dir }}
+          TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
         run: |
-          rm -rf "$TMP_DIR"
+          rm -rf "$TMPDIR" || true
