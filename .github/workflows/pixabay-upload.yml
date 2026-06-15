@@ -1,0 +1,376 @@
+name: Pixabay Search URL → API → Google Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Pixabay search URL, לדוגמה: https://pixabay.com/videos/search/love/"
+        required: true
+        default: "https://pixabay.com/videos/search/love/"
+
+      folder:
+        description: "תיקיית יעד ב-Google Drive"
+        required: true
+        default: "Pixabay"
+
+      per_page:
+        description: "כמה סרטונים להוריד"
+        required: true
+        default: "10"
+
+      quality:
+        description: "large / medium / small / best"
+        required: false
+        default: "large"
+
+      mode:
+        description: "videos = MP4 בלבד, links = קישורים בלבד, both = MP4 + קישורים"
+        required: false
+        default: "videos"
+
+      zip_name:
+        description: "שם ה-ZIP בלי .zip. אם ריק ייווצר לפי ה-query"
+        required: false
+        default: ""
+
+jobs:
+  pixabay_upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      # --------------------------------------------------------------
+      # 1️⃣ התקנת כלים
+      # --------------------------------------------------------------
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip curl
+          curl https://rclone.org/install.sh | sudo bash
+
+      # --------------------------------------------------------------
+      # 2️⃣ הגדרת rclone ל-Google Drive
+      # --------------------------------------------------------------
+      - name: Write rclone config
+        env:
+          RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
+        run: |
+          mkdir -p ~/.config/rclone
+
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive.file
+          token = $RCLONE_GDRIVE_TOKEN
+          EOF
+
+      # --------------------------------------------------------------
+      # 3️⃣ קריאה ל-Pixabay API, הורדת וידאו, יצירת ZIP והעלאה ל-Drive
+      # --------------------------------------------------------------
+      - name: Fetch Pixabay API, download videos, zip and upload
+        env:
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          URL_INPUT: ${{ github.event.inputs.url }}
+          DRIVE_FOLDER: ${{ github.event.inputs.folder }}
+          PER_PAGE: ${{ github.event.inputs.per_page }}
+          QUALITY: ${{ github.event.inputs.quality }}
+          MODE: ${{ github.event.inputs.mode }}
+          ZIP_NAME_INPUT: ${{ github.event.inputs.zip_name }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import csv
+          import json
+          import os
+          import re
+          import subprocess
+          import tempfile
+          import zipfile
+          from pathlib import Path
+          from urllib.parse import urlparse, parse_qs, unquote_plus, urlencode
+          from urllib.request import Request, urlopen
+
+          def extract_query(url):
+              parsed = urlparse(url)
+              qs = parse_qs(parsed.query)
+
+              # תמיכה בכתובות עם q=...
+              # לדוגמה:
+              # https://pixabay.com/videos/search/?q=love
+              if qs.get("q"):
+                  return unquote_plus(qs["q"][0]).strip()
+
+              if qs.get("query"):
+                  return unquote_plus(qs["query"][0]).strip()
+
+              parts = [unquote_plus(x) for x in parsed.path.split("/") if x]
+
+              # תמיכה בכתובות בסגנון:
+              # https://pixabay.com/videos/search/love/
+              # https://pixabay.com/videos/search/love/?order=ec
+              if len(parts) >= 3 and parts[0] == "videos" and parts[1] == "search":
+                  return parts[2].strip()
+
+              # תמיכה בכתובות אחרות עם videos/search
+              if "videos" in parts and "search" in parts:
+                  idx = parts.index("search")
+                  if idx + 1 < len(parts):
+                      return parts[idx + 1].strip()
+
+              raise SystemExit(f"לא הצלחתי לחלץ query מהכתובת: {url}")
+
+          def slugify(text, max_len=100):
+              text = text.strip()
+              text = re.sub(r"[^\w\u0590-\u05FF]+", "_", text, flags=re.UNICODE)
+              text = re.sub(r"_+", "_", text).strip("_")
+              return (text or "pixabay_videos")[:max_len]
+
+          def safe_filename(text, max_len=120):
+              text = text.strip()
+              text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
+              text = re.sub(r"\s+", " ", text).strip()
+              return (text or "video")[:max_len]
+
+          def choose_video_file(hit, quality):
+              """
+              Pixabay מחזיר כל וידאו כך:
+
+              hit["videos"] = {
+                  "large": {
+                      "url": "...large.mp4",
+                      "width": 1920,
+                      "height": 1080,
+                      "size": 12345678
+                  },
+                  "medium": {...},
+                  "small": {...}
+              }
+
+              quality אפשרי:
+              large, medium, small, best, high, sd, low
+              """
+
+              videos = hit.get("videos") or {}
+              if not videos:
+                  return None
+
+              quality = (quality or "large").strip().lower()
+
+              def area(v):
+                  return int(v.get("width") or 0) * int(v.get("height") or 0)
+
+              # בחירה לפי שם איכות מדויק
+              if quality in videos:
+                  return videos[quality]
+
+              # best / highest
+              if quality in ("best", "highest", "max", "high", "large"):
+                  return max(videos.values(), key=area)
+
+              # medium
+              if quality in ("medium", "mid"):
+                  return videos.get("medium") or max(videos.values(), key=area)
+
+              # small / sd / low
+              if quality in ("small", "sd", "low"):
+                  return videos.get("small") or min(videos.values(), key=area)
+
+              # fallback
+              return max(videos.values(), key=area)
+
+          def download_file(url, dest):
+              subprocess.run(
+                  [
+                      "curl",
+                      "-L",
+                      "--fail",
+                      "--retry",
+                      "3",
+                      "--retry-delay",
+                      "2",
+                      "-A",
+                      "Mozilla/5.0",
+                      "-o",
+                      str(dest),
+                      url,
+                  ],
+                  check=True,
+              )
+
+          api_key = os.environ.get("PIXABAY_API_KEY", "").strip()
+          if not api_key:
+              raise SystemExit("חסר secret בשם PIXABAY_API_KEY")
+
+          url_input = os.environ["URL_INPUT"].strip()
+          drive_folder = os.environ.get("DRIVE_FOLDER", "").strip().strip("/")
+          per_page = int(os.environ.get("PER_PAGE", "10"))
+          quality = os.environ.get("QUALITY", "large").strip()
+          mode = os.environ.get("MODE", "videos").strip().lower()
+          zip_name_input = os.environ.get("ZIP_NAME_INPUT", "").strip()
+
+          if mode not in ("videos", "links", "both"):
+              raise SystemExit("mode חייב להיות אחד מ: videos, links, both")
+
+          per_page = min(max(per_page, 1), 100)
+
+          query = extract_query(url_input)
+
+          print(f"🔍 Query extracted: {query}")
+          print(f"📡 Calling Pixabay Video API...")
+
+          api_url = "https://pixabay.com/api/videos/"
+
+          params = {
+              "key": api_key,
+              "q": query,
+              "per_page": per_page,
+          }
+
+          req = Request(
+              api_url + "?" + urlencode(params),
+              headers={
+                  "User-Agent": "Mozilla/5.0",
+              },
+          )
+
+          with urlopen(req, timeout=60) as resp:
+              data = json.load(resp)
+
+          hits = data.get("hits", [])
+
+          if not hits:
+              raise SystemExit("ה-API החזיר 0 סרטונים. בדוק API key, query או הגבלות Pixabay.")
+
+          print(f"✅ Found videos: {len(hits)}")
+
+          with tempfile.TemporaryDirectory() as tmp_dir:
+              tmp_dir = Path(tmp_dir)
+
+              manifest_rows = []
+              links_lines = []
+              downloaded = []
+
+              for idx, hit in enumerate(hits, start=1):
+                  title = hit.get("tags") or f"Pixabay video {idx}"
+                  page_url = hit.get("pageURL") or ""
+                  video_id = hit.get("id") or idx
+
+                  file_info = choose_video_file(hit, quality)
+
+                  direct_link = ""
+                  file_quality = ""
+                  width = ""
+                  height = ""
+                  file_size = ""
+                  downloaded_file = ""
+                  download_error = ""
+
+                  if file_info:
+                      direct_link = file_info.get("url", "")
+                      file_quality = ""
+                      width = file_info.get("width", "")
+                      height = file_info.get("height", "")
+                      file_size = file_info.get("size", "")
+
+                  manifest_rows.append({
+                      "index": idx,
+                      "id": video_id,
+                      "title": title,
+                      "page_url": page_url,
+                      "direct_mp4": direct_link,
+                      "quality": file_quality,
+                      "width": width,
+                      "height": height,
+                      "file_size": file_size,
+                      "downloaded_file": downloaded_file,
+                      "download_error": download_error,
+                  })
+
+                  if mode in ("links", "both") and direct_link:
+                      links_lines.append(f"{direct_link}\t{title}\t{page_url}")
+
+                  if mode in ("videos", "both"):
+                      if not direct_link:
+                          manifest_rows[-1]["download_error"] = "no_direct_link"
+                          continue
+
+                      safe_title = safe_filename(title)
+                      filename = f"{idx:02d}_{video_id}_{safe_title}.mp4"
+                      dest = tmp_dir / filename
+
+                      try:
+                          print(f"⬇️ Downloading {idx}/{len(hits)}: {title}")
+                          download_file(direct_link, dest)
+
+                          if dest.exists() and dest.stat().st_size > 0:
+                              downloaded.append((dest, f"videos/{filename}"))
+                              manifest_rows[-1]["downloaded_file"] = filename
+                          else:
+                              manifest_rows[-1]["download_error"] = "empty_file"
+
+                      except Exception as e:
+                          print(f"⚠️ Download failed: {title} | {e}")
+                          manifest_rows[-1]["download_error"] = str(e)
+
+              if mode in ("videos", "both") and not downloaded:
+                  raise SystemExit("אף וידאו לא הצליח לרדת. בדוק קישורים ישירים / הרשאות / איכות.")
+
+              if mode in ("links", "both") and not links_lines:
+                  raise SystemExit("לא נמצאו קישורים ישירים להעלאה.")
+
+              manifest_path = tmp_dir / "manifest.csv"
+
+              with open(manifest_path, "w", newline="", encoding="utf-8") as f:
+                  fieldnames = [
+                      "index",
+                      "id",
+                      "title",
+                      "page_url",
+                      "direct_mp4",
+                      "quality",
+                      "width",
+                      "height",
+                      "file_size",
+                      "downloaded_file",
+                      "download_error",
+                  ]
+
+                  writer = csv.DictWriter(f, fieldnames=fieldnames)
+                  writer.writeheader()
+                  writer.writerows(manifest_rows)
+
+              zip_name = zip_name_input or f"{slugify(query)}_pixabay_videos"
+
+              if zip_name.lower().endswith(".zip"):
+                  zip_name = zip_name[:-4]
+
+              zip_path = tmp_dir / f"{zip_name}.zip"
+
+              print(f"🗜️ Creating ZIP: {zip_path.name}")
+
+              with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                  for local_path, arcname in downloaded:
+                      zf.write(local_path, arcname)
+
+                  if mode in ("links", "both"):
+                      zf.writestr("links.txt", "\n".join(links_lines) + "\n")
+
+                  zf.write(manifest_path, "manifest.csv")
+
+              print(f"📦 ZIP size: {zip_path.stat().st_size / 1024 / 1024:.2f} MB")
+
+              remote_folder = f"gdrive:{drive_folder}" if drive_folder else "gdrive:"
+              remote_folder = remote_folder.rstrip("/")
+
+              print(f"🚀 Uploading to Google Drive folder: {remote_folder}")
+
+              subprocess.run(["rclone", "mkdir", remote_folder], check=True)
+              subprocess.run(
+                  ["rclone", "copy", str(zip_path), remote_folder, "--progress"],
+                  check=True,
+              )
+
+              print(f"✅ Finished. Uploaded {zip_path.name} to {remote_folder}")
+              print(f"✅ Videos downloaded: {len(downloaded)}/{len(hits)}")
+
+          PY
