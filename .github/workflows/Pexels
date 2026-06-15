@@ -1,0 +1,389 @@
+name: Pexels Search URL → API → Google Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Pexels search URL, לדוגמה: https://www.pexels.com/search/videos/vagina/"
+        required: true
+        default: "https://www.pexels.com/search/videos/vagina/"
+
+      folder:
+        description: "תיקיית יעד ב-Google Drive"
+        required: true
+        default: "Pexels"
+
+      per_page:
+        description: "כמה סרטונים להוריד"
+        required: true
+        default: "10"
+
+      quality:
+        description: "best / high / sd / או שם איכות ספציפי"
+        required: false
+        default: "best"
+
+      mode:
+        description: "videos = MP4 בלבד, links = קישורים בלבד, both = MP4 + קישורים"
+        required: false
+        default: "videos"
+
+      zip_name:
+        description: "שם ה-ZIP בלי .zip. אם ריק ייווצר לפי ה-query"
+        required: false
+        default: ""
+
+jobs:
+  pexels_upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      # --------------------------------------------------------------
+      # 1️⃣ התקנת כלים
+      # --------------------------------------------------------------
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip curl
+          curl https://rclone.org/install.sh | sudo bash
+
+      # --------------------------------------------------------------
+      # 2️⃣ הגדרת rclone ל-Google Drive
+      # --------------------------------------------------------------
+      - name: Write rclone config
+        env:
+          RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
+        run: |
+          mkdir -p ~/.config/rclone
+
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive.file
+          token = $RCLONE_GDRIVE_TOKEN
+          EOF
+
+      # --------------------------------------------------------------
+      # 3️⃣ קריאה ל-Pexels API, הורדת וידאו, יצירת ZIP והעלאה ל-Drive
+      # --------------------------------------------------------------
+      - name: Fetch Pexels API, download videos, zip and upload
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          URL_INPUT: ${{ github.event.inputs.url }}
+          DRIVE_FOLDER: ${{ github.event.inputs.folder }}
+          PER_PAGE: ${{ github.event.inputs.per_page }}
+          QUALITY: ${{ github.event.inputs.quality }}
+          MODE: ${{ github.event.inputs.mode }}
+          ZIP_NAME_INPUT: ${{ github.event.inputs.zip_name }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import csv
+          import json
+          import os
+          import re
+          import subprocess
+          import tempfile
+          import zipfile
+          from pathlib import Path
+          from urllib.parse import urlparse, parse_qs, unquote_plus, urlencode
+          from urllib.request import Request, urlopen
+
+          def extract_query(url):
+              parsed = urlparse(url)
+              qs = parse_qs(parsed.query)
+
+              for key in ("query", "q", "search"):
+                  if qs.get(key):
+                      return unquote_plus(qs[key][0]).strip()
+
+              parts = [unquote_plus(x) for x in parsed.path.split("/") if x]
+
+              # לדוגמה:
+              # /search/videos/vagina/
+              if len(parts) >= 3 and parts[0] == "search" and parts[1] == "videos":
+                  return parts[2].strip()
+
+              # fallback
+              if "videos" in parts:
+                  idx = parts.index("videos")
+                  if idx + 1 < len(parts):
+                      return parts[idx + 1].strip()
+
+              raise SystemExit(f"לא הצלחתי לחלץ query מהכתובת: {url}")
+
+          def slugify(text, max_len=100):
+              text = text.strip()
+              text = re.sub(r"[^\w\u0590-\u05FF]+", "_", text, flags=re.UNICODE)
+              text = re.sub(r"_+", "_", text).strip("_")
+              return (text or "pexels_videos")[:max_len]
+
+          def safe_filename(text, max_len=120):
+              text = text.strip()
+              text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
+              text = re.sub(r"\s+", " ", text).strip()
+              return (text or "video")[:max_len]
+
+          def choose_file(video, quality):
+              files = video.get("video_files") or []
+              full_res = (video.get("full_res") or "").strip()
+
+              def area(f):
+                  return int(f.get("width") or 0) * int(f.get("height") or 0)
+
+              quality = (quality or "best").strip().lower()
+
+              # בחירת האיכות הגבוהה ביותר
+              if quality in ("best", "highest", "max"):
+                  if full_res:
+                      return {
+                          "link": full_res,
+                          "quality": "full_res",
+                          "width": video.get("width", ""),
+                          "height": video.get("height", ""),
+                          "file_type": "video/mp4",
+                      }
+
+                  if files:
+                      return max(files, key=area)
+
+              # HD / הגבוה ביותר מתוך video_files
+              if quality in ("high", "hd"):
+                  if files:
+                      return max(files, key=area)
+
+                  if full_res:
+                      return {
+                          "link": full_res,
+                          "quality": "full_res",
+                          "width": video.get("width", ""),
+                          "height": video.get("height", ""),
+                          "file_type": "video/mp4",
+                      }
+
+              # SD / הנמוך ביותר
+              if quality in ("sd", "low"):
+                  if files:
+                      if quality == "sd":
+                          for f in files:
+                              if str(f.get("quality", "")).lower() == "sd":
+                                  return f
+
+                      return min(files, key=area)
+
+              # בחירה לפי שם איכות מדויק
+              if files:
+                  for f in files:
+                      if str(f.get("quality", "")).lower() == quality:
+                          return f
+
+                  return max(files, key=area)
+
+              if full_res:
+                  return {
+                      "link": full_res,
+                      "quality": "full_res",
+                      "width": video.get("width", ""),
+                      "height": video.get("height", ""),
+                      "file_type": "video/mp4",
+                  }
+
+              return None
+
+          def download_file(url, dest):
+              subprocess.run(
+                  [
+                      "curl",
+                      "-L",
+                      "--fail",
+                      "--retry",
+                      "3",
+                      "--retry-delay",
+                      "2",
+                      "-A",
+                      "Mozilla/5.0",
+                      "-o",
+                      str(dest),
+                      url,
+                  ],
+                  check=True,
+              )
+
+          api_key = os.environ.get("PEXELS_API_KEY", "").strip()
+          if not api_key:
+              raise SystemExit("חסר secret בשם PEXELS_API_KEY")
+
+          url_input = os.environ["URL_INPUT"].strip()
+          drive_folder = os.environ.get("DRIVE_FOLDER", "").strip().strip("/")
+          per_page = int(os.environ.get("PER_PAGE", "10"))
+          quality = os.environ.get("QUALITY", "best").strip()
+          mode = os.environ.get("MODE", "videos").strip().lower()
+          zip_name_input = os.environ.get("ZIP_NAME_INPUT", "").strip()
+
+          if mode not in ("videos", "links", "both"):
+              raise SystemExit("mode חייב להיות אחד מ: videos, links, both")
+
+          per_page = min(max(per_page, 1), 80)
+
+          query = extract_query(url_input)
+
+          print(f"🔍 Query extracted: {query}")
+          print(f"📡 Calling Pexels API...")
+
+          api_url = "https://api.pexels.com/videos/search"
+
+          params = {
+              "query": query,
+              "per_page": per_page,
+          }
+
+          req = Request(
+              api_url + "?" + urlencode(params),
+              headers={
+                  "Authorization": api_key,
+                  "User-Agent": "Mozilla/5.0",
+              },
+          )
+
+          with urlopen(req, timeout=60) as resp:
+              data = json.load(resp)
+
+          videos = data.get("videos", [])
+
+          if not videos:
+              raise SystemExit("ה-API החזיר 0 סרטונים. בדוק API key, query או הגבלות Pexels.")
+
+          print(f"✅ Found videos: {len(videos)}")
+
+          with tempfile.TemporaryDirectory() as tmp_dir:
+              tmp_dir = Path(tmp_dir)
+
+              manifest_rows = []
+              links_lines = []
+              downloaded = []
+
+              for idx, video in enumerate(videos, start=1):
+                  title = video.get("title") or f"Pexels video {idx}"
+                  page_url = video.get("url") or ""
+                  video_id = video.get("id") or idx
+
+                  file_info = choose_file(video, quality)
+
+                  direct_link = ""
+                  file_quality = ""
+                  width = ""
+                  height = ""
+                  file_type = ""
+                  downloaded_file = ""
+                  download_error = ""
+
+                  if file_info:
+                      direct_link = file_info.get("link", "")
+                      file_quality = file_info.get("quality", "")
+                      width = file_info.get("width", "")
+                      height = file_info.get("height", "")
+                      file_type = file_info.get("file_type", "")
+
+                  manifest_rows.append({
+                      "index": idx,
+                      "id": video_id,
+                      "title": title,
+                      "page_url": page_url,
+                      "direct_mp4": direct_link,
+                      "quality": file_quality,
+                      "width": width,
+                      "height": height,
+                      "file_type": file_type,
+                      "downloaded_file": downloaded_file,
+                      "download_error": download_error,
+                  })
+
+                  if mode in ("links", "both") and direct_link:
+                      links_lines.append(f"{direct_link}\t{title}\t{page_url}")
+
+                  if mode in ("videos", "both"):
+                      if not direct_link:
+                          manifest_rows[-1]["download_error"] = "no_direct_link"
+                          continue
+
+                      safe_title = safe_filename(title)
+                      filename = f"{idx:02d}_{video_id}_{safe_title}.mp4"
+                      dest = tmp_dir / filename
+
+                      try:
+                          print(f"⬇️ Downloading {idx}/{len(videos)}: {title}")
+                          download_file(direct_link, dest)
+
+                          if dest.exists() and dest.stat().st_size > 0:
+                              downloaded.append((dest, f"videos/{filename}"))
+                              manifest_rows[-1]["downloaded_file"] = filename
+                          else:
+                              manifest_rows[-1]["download_error"] = "empty_file"
+
+                      except Exception as e:
+                          print(f"⚠️ Download failed: {title} | {e}")
+                          manifest_rows[-1]["download_error"] = str(e)
+
+              if mode in ("videos", "both") and not downloaded:
+                  raise SystemExit("אף וידאו לא הצליח לרדת. בדוק קישורים ישירים / הרשאות / איכות.")
+
+              if mode in ("links", "both") and not links_lines:
+                  raise SystemExit("לא נמצאו קישורים ישירים להעלאה.")
+
+              manifest_path = tmp_dir / "manifest.csv"
+
+              with open(manifest_path, "w", newline="", encoding="utf-8") as f:
+                  fieldnames = [
+                      "index",
+                      "id",
+                      "title",
+                      "page_url",
+                      "direct_mp4",
+                      "quality",
+                      "width",
+                      "height",
+                      "file_type",
+                      "downloaded_file",
+                      "download_error",
+                  ]
+
+                  writer = csv.DictWriter(f, fieldnames=fieldnames)
+                  writer.writeheader()
+                  writer.writerows(manifest_rows)
+
+              zip_name = zip_name_input or f"{slugify(query)}_pexels_videos"
+
+              if zip_name.lower().endswith(".zip"):
+                  zip_name = zip_name[:-4]
+
+              zip_path = tmp_dir / f"{zip_name}.zip"
+
+              print(f"🗜️ Creating ZIP: {zip_path.name}")
+
+              with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                  for local_path, arcname in downloaded:
+                      zf.write(local_path, arcname)
+
+                  if mode in ("links", "both"):
+                      zf.writestr("links.txt", "\n".join(links_lines) + "\n")
+
+                  zf.write(manifest_path, "manifest.csv")
+
+              print(f"📦 ZIP size: {zip_path.stat().st_size / 1024 / 1024:.2f} MB")
+
+              remote_folder = f"gdrive:{drive_folder}" if drive_folder else "gdrive:"
+              remote_folder = remote_folder.rstrip("/")
+
+              print(f"🚀 Uploading to Google Drive folder: {remote_folder}")
+
+              subprocess.run(["rclone", "mkdir", remote_folder], check=True)
+              subprocess.run(
+                  ["rclone", "copy", str(zip_path), remote_folder, "--progress"],
+                  check=True,
+              )
+
+              print(f"✅ Finished. Uploaded {zip_path.name} to {remote_folder}")
+              print(f"✅ Videos downloaded: {len(downloaded)}/{len(videos)}")
+
+          PY
