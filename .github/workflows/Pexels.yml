@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: "Pexels search URL, לדוגמה: https://www.pexels.com/search/videos/vagina/"
+        description: "Pexels search URL, לדוגמה: https://www.pexels.com/search/videos/Bed/"
         required: true
-        default: "https://www.pexels.com/search/videos/vagina/"
+        default: "https://www.pexels.com/search/videos/Bed/"
 
       folder:
         description: "תיקיית יעד ב-Google Drive"
@@ -101,7 +101,7 @@ jobs:
               parts = [unquote_plus(x) for x in parsed.path.split("/") if x]
 
               # לדוגמה:
-              # /search/videos/vagina/
+              # /search/videos/Bed/
               if len(parts) >= 3 and parts[0] == "search" and parts[1] == "videos":
                   return parts[2].strip()
 
