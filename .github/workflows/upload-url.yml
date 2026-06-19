@@ -1,0 +1,177 @@
+name: Upload url → Google Drive (clean links, no zip, with JS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "כתובת URL של דף HTML"
+        required: true
+        default: "https://commons.wikimedia.org/w/index.php?title=Special%3AMediaSearch&search=%D7%9B%D7%9C%D7%91&ns0=1&ns6=1&fulltext=Search&type=video"
+      folder:
+        description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
+        required: true
+        default: "MyUploads"
+      filename:
+        description: "שם קובץ לבסיס (בלי סיומת). אם ריק – ייקח מה‑URL/כותרת הדף"
+        required: false
+        default: ""
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      # ----------------------------------------------------------------
+      # 0️⃣  Checkout – רק בשביל שה‑UI של GitHub יראה את ה‑workflow
+      # ----------------------------------------------------------------
+      - name: Checkout repository (required for UI)
+        uses: actions/checkout@v3
+
+      # ----------------------------------------------------------------
+      # 1️⃣  Install dependencies: rclone, node, playwright
+      # ----------------------------------------------------------------
+      - name: Install tools
+        run: |
+          # rclone
+          curl -s https://rclone.org/install.sh | sudo bash
+          # node + npm
+          sudo apt-get update -qq
+          sudo apt-get install -y nodejs npm
+          # playwright (includes chromium)
+          npm install -g playwright
+          # playwright browsers (cheapest “install”)
+          playwright install chromium
+
+      # ----------------------------------------------------------------
+      # 2️⃣  Write rclone config (remote בשם gdrive)
+      # ----------------------------------------------------------------
+      - name: Write rclone config
+        env:
+          RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive.file
+          token = $RCLONE_GDRIVE_TOKEN
+          EOF
+
+      # ----------------------------------------------------------------
+      # 3️⃣  Resolve base name (title of page) – still using lynx for HTML title
+      # ----------------------------------------------------------------
+      - name: Resolve base name
+        id: resolve
+        env:
+          FILE_URL: ${{ github.event.inputs.url }}
+          USER_NAME: ${{ github.event.inputs.filename }}
+        run: |
+          set -e
+          # Get page title (if needed)
+          if [[ -z "$USER_NAME" ]]; then
+            PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin | head -n 1)
+            CLEAN_TITLE=$(echo "$PAGE_TITLE" | tr -cd '[:alnum:] _-')
+            BASE_NAME="${CLEAN_TITLE:-page}"
+          else
+            BASE_NAME="$USER_NAME"
+          fi
+          echo "base_name=$BASE_NAME" >> $GITHUB_OUTPUT
+          echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> $GITHUB_OUTPUT
+
+      # ----------------------------------------------------------------
+      # 4️⃣  Create temporary working directory
+      # ----------------------------------------------------------------
+      - name: Create temporary directory
+        id: tmpdir
+        run: |
+          TMPDIR=$(mktemp -d)
+          echo "tmpdir=$TMPDIR" >> $GITHUB_OUTPUT
+
+      # ----------------------------------------------------------------
+      # 5️⃣  Run Playwright script → collect **all** direct media links
+      # ----------------------------------------------------------------
+      - name: Extract links with Playwright
+        id: extract
+        env:
+          FILE_URL: ${{ github.event.inputs.url }}
+          TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
+        run: |
+          set -e
+          cd "$TMPDIR"
+
+          # ---- Write the Node script -------------------------------------------------
+          cat > scrape.js <<'EOF'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          const url = process.env.FILE_URL;
+          const outFile = 'links.txt';
+
+          // extensions we consider “media”
+          const mediaExt = ['webm','mp4','mkv','mov','avi','flv','wmv','jpg','jpeg','png','gif','svg','bmp','tif','tiff','pdf','mp3','ogg','wav','flac','aac'];
+          const mediaPattern = new RegExp(`https?://[^"\\s]+\\.(${mediaExt.join('|')})([?&#].*)?$`, 'i');
+
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
+
+            // intercept network requests and keep only those matching mediaPattern
+            const links = new Set();
+            page.on('response', async response => {
+              const url = response.url();
+              if (mediaPattern.test(url)) {
+                // strip query/hash
+                const clean = url.split(/[?&#]/)[0];
+                links.add(clean);
+              }
+            });
+
+            await page.goto(url, { waitUntil: 'networkidle' });
+
+            // ---- infinite‑scroll: keep scrolling until no new height ----
+            let previousHeight = 0;
+            while (true) {
+              const newHeight = await page.evaluate('document.body.scrollHeight');
+              if (newHeight === previousHeight) break;      // reached bottom
+              previousHeight = newHeight;
+              await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
+              // wait a bit for lazy‑loaded content
+              await page.waitForTimeout(1500);
+            }
+
+            // sometimes media links are only in the DOM (e.g. <a href="...">)
+            const domLinks = await page.$$eval('a[href]', els => els.map(e => e.href));
+            domLinks.forEach(l => { if (mediaPattern.test(l)) links.add(l.split(/[?&#]/)[0]); });
+
+            // write unique sorted list
+            const sorted = Array.from(links).sort();
+            fs.writeFileSync(outFile, sorted.join('\n') + '\n');
+            await browser.close();
+          })();
+          EOF
+
+          # ---- Run the script --------------------------------------------------------
+          node scrape.js
+
+          echo "✅ extracted $(wc -l < links.txt) links"
+          # expose the file path for the next step
+          echo "links_path=$TMPDIR/links.txt" >> $GITHUB_OUTPUT
+
+      # ----------------------------------------------------------------
+      # 6️⃣  Upload the links file to Google Drive
+      # ----------------------------------------------------------------
+      - name: Upload links file to Drive
+        env:
+          REMOTE_BASE: ${{ steps.resolve.outputs.remote_base }}
+          LINKS_FILE: ${{ steps.extract.outputs.links_path }}
+        run: |
+          set -e
+          rclone copy "$LINKS_FILE" "${REMOTE_BASE}.txt" --progress
+
+      # ----------------------------------------------------------------
+      # 7️⃣  Clean‑up (runner יסגור את /tmp אוטומטית, רק לשם שכמט)
+      # ----------------------------------------------------------------
+      - name: Clean temporary files
+        if: always()
+        env:
+          TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
+        run: |
+          rm -rf "$TMPDIR" || true
