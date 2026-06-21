@@ -1,46 +1,135 @@
-      # --------------------------------------------------------------
-      # 5️⃣  Extract links with Playwright (עם גלילה אינסופית)
-      # --------------------------------------------------------------
+name: Upload URL → Google Drive (clean links, no zip, with JS)
+
+# --------------------------------------------------------------
+#  Trigger – רק מריץ ידנית מה‑UI של GitHub
+# --------------------------------------------------------------
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "כתובת URL של דף HTML (לדוגמה – MediaSearch של Wikimedia)"
+        required: true
+        default: "https://commons.wikimedia.org/w/index.php?title=Special%3AMediaSearch&search=%D7%9B%D7%9C%D7%91&ns0=1&ns6=1&fulltext=Search&type=video"
+      folder:
+        description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
+        required: true
+        default: "MyUploads"
+      filename:
+        description: "שם קובץ לבסיס (בלי סיומת). אם ריק – ייקח מכותרת העמוד"
+        required: false
+        default: ""
+
+# --------------------------------------------------------------
+jobs:
+# --------------------------------------------------------------
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      # ----------------------------------------------------------------
+      # 0️⃣  Checkout – רק בשביל שה‑UI של GitHub יראה את ה‑workflow
+      # ----------------------------------------------------------------
+      - name: Checkout repository (required for UI)
+        uses: actions/checkout@v3
+
+      # ----------------------------------------------------------------
+      # 1️⃣  Install required tools: rclone, node, npm, playwright
+      # ----------------------------------------------------------------
+      - name: Install tools (rclone + node + playwright)
+        run: |
+          # ---- rclone -------------------------------------------------
+          curl -s https://rclone.org/install.sh | sudo bash
+
+          # ---- node + npm ---------------------------------------------
+          sudo apt-get update -qq
+          sudo apt-get install -y nodejs npm
+
+          # ---- playwright -----------------------------------------------
+          npm install -g playwright
+          # מתקין רק את הדפדפן chromium ה‑headless
+          playwright install chromium
+
+      # ----------------------------------------------------------------
+      # 2️⃣  Write rclone config (remote בשם gdrive)
+      # ----------------------------------------------------------------
+      - name: Write rclone config
+        env:
+          RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf <<EOF
+          [gdrive]
+          type = drive
+          scope = drive.file
+          token = $RCLONE_GDRIVE_TOKEN
+          EOF
+
+      # ----------------------------------------------------------------
+      # 3️⃣  Resolve a base name for the output file (title of page or user‑provided)
+      # ----------------------------------------------------------------
+      - name: Resolve base name
+        id: resolve
+        env:
+          FILE_URL: ${{ github.event.inputs.url }}
+          USER_NAME: ${{ github.event.inputs.filename }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$USER_NAME" ]]; then
+            BASE_NAME="$USER_NAME"
+          else
+            # לוכד את <title> של הדף (אם קיים) בעזרת lynx – אינו תלוי ב‑JS
+            PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin | head -n 1)
+            CLEAN_TITLE=$(echo "$PAGE_TITLE" | tr -cd '[:alnum:] _-')
+            BASE_NAME="${CLEAN_TITLE:-page}"
+          fi
+
+          echo "base_name=$BASE_NAME" >> $GITHUB_OUTPUT
+          echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> $GITHUB_OUTPUT
+
+      # ----------------------------------------------------------------
+      # 4️⃣  Create a temporary working directory (will be auto‑cleaned)
+      # ----------------------------------------------------------------
+      - name: Create temporary directory
+        id: tmpdir
+        run: |
+          TMPDIR=$(mktemp -d)
+          echo "tmpdir=$TMPDIR" >> $GITHUB_OUTPUT
+
+      # ----------------------------------------------------------------
+      # 5️⃣  Extract **all** media links with Playwright (incl. infinite scroll)
+      # ----------------------------------------------------------------
       - name: Extract links with Playwright
         id: extract
         env:
           FILE_URL: ${{ github.event.inputs.url }}
           TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
         run: |
-          set -euo pipefail               # חוסך בעיות של משתנים ריקים
+          set -euo pipefail
           cd "$TMPDIR"
 
-          # ---------- 5.1. התקנת Node, npm, playwright ----------
-          echo "🔧 Installing Node.js, npm and Playwright …"
-          sudo apt-get update -qq
-          sudo apt-get install -y nodejs npm  # Node 20 כבר במקומת‑הפצה
-          npm install -g playwright           # מתקין החבילה גלובלית
-          # מתקין את הדפדפן Chromium (ה‑headless) – רק פעם אחת במכונה
-          playwright install chromium
-
-          # ---------- 5.2. כתיבת סקריפט Node ----------
+          # ---------- 5.1. כתיבת הסקריפט ---------------------------------
           cat > scrape.js <<'EOF'
           const { chromium } = require('playwright');
           const fs = require('fs');
           const path = require('path');
 
-          //--- קבלת כתובת ה‑URL מה‑env ---------------------------------
+          // קבלת ה‑URL מה‑env
           const url = process.env.FILE_URL;
           if (!url) {
-            console.error('❌ FILE_URL environment variable is missing');
+            console.error('❌ FILE_URL not defined');
             process.exit(1);
           }
 
-          //--- רשימת סיומות מדיה שאנחנו מקבלים -------------------------
+          // סיומות המדיה שאנו מחפשים (אפשר להוסיף במידת הצורך)
           const mediaExt = [
             'webm','mp4','mkv','mov','avi','flv','wmv',
             'jpg','jpeg','png','gif','svg','bmp','tif','tiff',
             'pdf','mp3','ogg','wav','flac','aac'
           ];
-          const mediaPattern = new RegExp(`https?://[^"\\s]+\\.(${mediaExt.join('|')})([?&#].*)?$`, 'i');
+          const mediaRegex = new RegExp(`https?://[^"\\s]+\\.(${mediaExt.join('|')})([?&#].*)?$`, 'i');
 
-          //--- פונקציית עזר להסרת query‑string / hash --------------------
-          const cleanUrl = (u) => u.split(/[?&#]/)[0];
+          // remove query string / hash
+          const clean = (u) => u.split(/[?&#]/)[0];
 
           (async () => {
             const browser = await chromium.launch({ headless: true });
@@ -48,31 +137,29 @@
 
             const found = new Set();
 
-            //--- נעקוב אחרי כל תגובת רשת (response) -----------------------
+            // 1️⃣ קולט תגובות רשת של קבצים מדיה
             page.on('response', async (resp) => {
               const u = resp.url();
-              if (mediaPattern.test(u)) {
-                found.add(cleanUrl(u));
-              }
+              if (mediaRegex.test(u)) found.add(clean(u));
             });
 
             console.log(`🌐 Opening ${url}`);
             await page.goto(url, { waitUntil: 'networkidle' });
 
-            //--- גלילה אינסופית – עד שלא גדל יותר ה‑scrollHeight -------
-            let previousHeight = 0;
+            // 2️⃣ גלילה אינסופית עד שה‑scrollHeight לא משתנה
+            let prevHeight = 0;
             while (true) {
-              const newHeight = await page.evaluate(() => document.body.scrollHeight);
-              if (newHeight === previousHeight) break;   // אין עוד תוכן
-              previousHeight = newHeight;
-              await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-              await page.waitForTimeout(1500);           // זמן לטעינה של ה‑lazy‑load
+              const curHeight = await page.evaluate('document.body.scrollHeight');
+              if (curHeight === prevHeight) break;
+              prevHeight = curHeight;
+              await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
+              await page.waitForTimeout(1500);   // זמן לטעינת ה‑lazy‑load
             }
 
-            //--- קישורים שייתכן ונמצאים רק ב‑DOM (ולא ברשת) ----------
+            // 3️⃣ קישורים שנמצאים רק ב‑DOM (לדוגמה <a href="…">)
             const domLinks = await page.$$eval('a[href]', els => els.map(e => e.href));
             domLinks.forEach(l => {
-              if (mediaPattern.test(l)) found.add(cleanUrl(l));
+              if (mediaRegex.test(l)) found.add(clean(l));
             });
 
             await browser.close();
@@ -80,7 +167,7 @@
             const sorted = Array.from(found).sort();
             const outPath = path.resolve('links.txt');
             if (sorted.length === 0) {
-              console.warn('⚠️ No media links were detected – writing placeholder file');
+              console.warn('⚠️ No media links were found – writing placeholder file');
               fs.writeFileSync(outPath, 'No direct media links found on this page.\n');
             } else {
               fs.writeFileSync(outPath, sorted.join('\n') + '\n');
@@ -92,12 +179,33 @@
           });
           EOF
 
-          # ---------- 5.3. הרצת הסקריפט ----------
+          # ---------- 5.2. הרצת הסקריפט ---------------------------------
           echo "🚀 Running Playwright scraper …"
           node scrape.js
 
-          # ---------- 5.4. חשיפת הקובץ לשאר ה‑steps ----------
+          # ---------- 5.3. חשיפת הנתיב לשלב הבא -------------------------
           LINKS_FILE="$(pwd)/links.txt"
           echo "links_path=$LINKS_FILE" >> $GITHUB_OUTPUT
-          echo "📄 First 10 lines of links.txt:"
+          echo "📄 First 10 lines of the generated file:"
           head -n 10 "$LINKS_FILE" || true
+
+      # ----------------------------------------------------------------
+      # 6️⃣  Upload the generated links.txt to Google Drive
+      # ----------------------------------------------------------------
+      - name: Upload links file to Drive
+        env:
+          REMOTE_BASE: ${{ steps.resolve.outputs.remote_base }}
+          LINKS_FILE: ${{ steps.extract.outputs.links_path }}
+        run: |
+          set -euo pipefail
+          rclone copy "$LINKS_FILE" "${REMOTE_BASE}.txt" --progress
+
+      # ----------------------------------------------------------------
+      # 7️⃣  Clean‑up (ה‑runner סוגר את /tmp אוטומטית)
+      # ----------------------------------------------------------------
+      - name: Clean temporary files
+        if: always()
+        env:
+          TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
+        run: |
+          rm -rf "$TMPDIR" || true
