@@ -27,7 +27,7 @@ on:
       scroll_wait_ms:
         description: "זמן המתנה אחרי כל גלילה, באלפיות שנייה"
         required: false
-        default: "1500"
+        default: "3500"
 
 jobs:
   upload:
@@ -173,7 +173,7 @@ jobs:
 
             const fileUrl = process.env.FILE_URL;
             const passes = Math.max(1, Number(process.env.SCROLL_PASSES || '20'));
-            const waitMs = Math.max(250, Number(process.env.SCROLL_WAIT_MS || '1500'));
+            const waitMs = Math.max(250, Number(process.env.SCROLL_WAIT_MS || '3500'));
 
             const mediaExt = /\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)(?:[?#].*)?$/i;
 
