@@ -36,21 +36,7 @@ jobs:
 
     steps:
       # --------------------------------------------------------------
-      # 0️⃣ Checkout
-      # --------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      # --------------------------------------------------------------
-      # 1️⃣ Node.js
-      # --------------------------------------------------------------
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      # --------------------------------------------------------------
-      # 2️⃣ Prepare debug log
+      # 0️⃣ Prepare debug log
       # --------------------------------------------------------------
       - name: Prepare debug log
         run: |
@@ -72,6 +58,20 @@ jobs:
           } >> "$RUN_LOG"
 
           echo "RUN_LOG=$RUN_LOG" >> "$GITHUB_ENV"
+
+      # --------------------------------------------------------------
+      # 1️⃣ Checkout
+      # --------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------------------
+      # 2️⃣ Node.js
+      # --------------------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       # --------------------------------------------------------------
       # 3️⃣ Install rclone + Playwright
@@ -143,12 +143,26 @@ jobs:
           echo "FILE_URL=$FILE_URL"
           echo "USER_NAME=$USER_NAME"
 
-          CONTENT_TYPE=$(curl -sI -L "$FILE_URL" \
-                          | awk -F': ' 'tolower($1) ~ /^content-type$/ {sub(/^[^:]+:[[:space:]]*/, ""); val=$0} END{print val}' \
+          USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+
+          CONTENT_TYPE=$(curl -sI -L -A "$USER_AGENT" "$FILE_URL" \
+                          | awk -F': ' 'tolower($1) ~ /^content-type$/ {v=$0; sub(/^[^:]+:[[:space:]]*/, "", v)} END{print v}' \
                           | tail -n 1 \
-                          | tr -d '\r')
+                          | tr -d '\r' \
+                          | sed 's/[[:space:]]*$//')
+
+          IS_HTML_URL="false"
+
+          if [[ "$CONTENT_TYPE" == text/html* ]]; then
+            IS_HTML_URL="true"
+          fi
+
+          if [[ "$FILE_URL" == *"Special:MediaSearch"* || "$FILE_URL" == *"Special%3AMediaSearch"* ]]; then
+            IS_HTML_URL="true"
+          fi
 
           echo "🕵️ Content-Type = $CONTENT_TYPE"
+          echo "IS_HTML_URL = $IS_HTML_URL"
 
           if [[ -n "$USER_NAME" ]]; then
             BASE_NAME=$(python3 - "$USER_NAME" <<'PY'
@@ -160,8 +174,8 @@ print((s[:120] or "page").strip())
 PY
             )
           else
-            if [[ "$CONTENT_TYPE" == text/html* ]]; then
-              PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin 2>/dev/null | head -n 1 || true)
+            if [[ "$IS_HTML_URL" == "true" ]]; then
+              PAGE_TITLE=$(curl -sL -A "$USER_AGENT" "$FILE_URL" | lynx -dump -force_html -nolist -stdin 2>/dev/null | head -n 1 || true)
 
               BASE_NAME=$(python3 - "$PAGE_TITLE" <<'PY'
 import sys, re
@@ -182,6 +196,7 @@ PY
 
           echo "base_name=$BASE_NAME" >> "$GITHUB_OUTPUT"
           echo "content_type=$CONTENT_TYPE" >> "$GITHUB_OUTPUT"
+          echo "is_html_url=$IS_HTML_URL" >> "$GITHUB_OUTPUT"
           echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> "$GITHUB_OUTPUT"
 
           echo "=== RESOLVE END ==="
@@ -213,6 +228,7 @@ PY
         env:
           FILE_URL: ${{ github.event.inputs.url }}
           CONTENT_TYPE: ${{ steps.resolve.outputs.content_type }}
+          IS_HTML_URL: ${{ steps.resolve.outputs.is_html_url }}
           BASE_NAME: ${{ steps.resolve.outputs.base_name }}
           REMOTE_BASE: ${{ steps.resolve.outputs.remote_base }}
           TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
@@ -229,6 +245,7 @@ PY
           echo "=== MAIN START ==="
           echo "FILE_URL=$FILE_URL"
           echo "CONTENT_TYPE=$CONTENT_TYPE"
+          echo "IS_HTML_URL=$IS_HTML_URL"
           echo "BASE_NAME=$BASE_NAME"
           echo "REMOTE_BASE=$REMOTE_BASE"
           echo "TMPDIR=$TMPDIR"
@@ -238,7 +255,7 @@ PY
           cd "$TMPDIR"
 
           # ------------------- קובץ מדיה ---------------------------
-          if [[ "$CONTENT_TYPE" != text/html* ]]; then
+          if [[ "$IS_HTML_URL" != "true" && "$CONTENT_TYPE" != text/html* ]]; then
             echo "📥 Downloading media file → $BASE_NAME"
 
             curl -L -f -sS -o "$BASE_NAME" "$FILE_URL"
@@ -607,10 +624,6 @@ NODE
               sed -n '1,300p' "$TMPDIR_FROM_STEP/links.txt" 2>/dev/null || true
               echo ""
 
-              echo "--- page.html head ---"
-              sed -n '1,80p' "$TMPDIR_FROM_STEP/page.html" 2>/dev/null || true
-              echo ""
-
               echo "--- extract_links.js tail ---"
               tail -n 120 "$TMPDIR_FROM_STEP/extract_links.js" 2>/dev/null || true
               echo ""
@@ -634,8 +647,8 @@ NODE
         if: always()
         continue-on-error: true
         env:
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM: "p0556722432@gmail.com"
+          EMAIL_TO: "p0556722432@gmail.com"
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
 
           RUN_LOG: ${{ env.RUN_LOG }}
@@ -646,100 +659,99 @@ NODE
           set +e
 
           python3 <<'PY'
-          import os
-          import smtplib
-          from email.mime.text import MIMEText
-          from email.mime.multipart import MIMEMultipart
+import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-          email_from = os.environ.get("EMAIL_FROM", "").strip()
-          email_to = os.environ.get("EMAIL_TO", "").strip()
-          email_password = os.environ.get("EMAIL_PASSWORD", "").strip()
+email_from = os.environ.get("EMAIL_FROM", "").strip()
+email_to = os.environ.get("EMAIL_TO", "").strip()
+email_password = os.environ.get("EMAIL_PASSWORD", "").strip()
 
-          run_log = os.environ.get("RUN_LOG", "/tmp/upload_project_debug.log")
-          snapshot = os.environ.get("DEBUG_SNAPSHOT", "/tmp/upload_project_debug_snapshot.txt")
-          tmpdir = os.environ.get("TMPDIR_FROM_STEP", "")
+run_log = os.environ.get("RUN_LOG", "/tmp/upload_project_debug.log")
+snapshot = os.environ.get("DEBUG_SNAPSHOT", "/tmp/upload_project_debug_snapshot.txt")
+tmpdir = os.environ.get("TMPDIR_FROM_STEP", "")
 
-          github_server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-          repository = os.environ.get("GITHUB_REPOSITORY", "")
-          workflow = os.environ.get("GITHUB_WORKFLOW", "")
-          run_id = os.environ.get("GITHUB_RUN_ID", "")
-          run_number = os.environ.get("GITHUB_RUN_NUMBER", "")
-          job = os.environ.get("GITHUB_JOB", "")
-          job_status = os.environ.get("JOB_STATUS", "unknown")
+github_server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+repository = os.environ.get("GITHUB_REPOSITORY", "")
+workflow = os.environ.get("GITHUB_WORKFLOW", "")
+run_id = os.environ.get("GITHUB_RUN_ID", "")
+run_number = os.environ.get("GITHUB_RUN_NUMBER", "")
+job = os.environ.get("GITHUB_JOB", "")
+job_status = os.environ.get("JOB_STATUS", "unknown")
 
-          if not email_from or not email_to or not email_password:
-              print("EMAIL SKIPPED: missing EMAIL_FROM / EMAIL_TO / EMAIL_PASSWORD secrets")
-              raise SystemExit(0)
+if not email_from or not email_to or not email_password:
+    print("EMAIL SKIPPED: missing EMAIL_FROM / EMAIL_TO / EMAIL_PASSWORD")
+    raise SystemExit(0)
 
-          run_url = f"{github_server}/{repository}/actions/runs/{run_id}"
+run_url = f"{github_server}/{repository}/actions/runs/{run_id}"
 
-          body_parts = []
-          body_parts.append("GitHub Actions Debug Email")
-          body_parts.append("")
-          body_parts.append(f"Workflow: {workflow}")
-          body_parts.append(f"Repository: {repository}")
-          body_parts.append(f"Run ID: {run_id}")
-          body_parts.append(f"Run Number: {run_number}")
-          body_parts.append(f"Job: {job}")
-          body_parts.append(f"Job status: {job_status}")
-          body_parts.append(f"Run URL: {run_url}")
-          body_parts.append("")
+body_parts = []
+body_parts.append("GitHub Actions Debug Email")
+body_parts.append("")
+body_parts.append(f"Workflow: {workflow}")
+body_parts.append(f"Repository: {repository}")
+body_parts.append(f"Run ID: {run_id}")
+body_parts.append(f"Run Number: {run_number}")
+body_parts.append(f"Job: {job}")
+body_parts.append(f"Job status: {job_status}")
+body_parts.append(f"Run URL: {run_url}")
+body_parts.append("")
 
-          if tmpdir:
-              body_parts.append(f"TMPDIR: {tmpdir}")
-              body_parts.append("")
+if tmpdir:
+    body_parts.append(f"TMPDIR: {tmpdir}")
+    body_parts.append("")
 
-          body_parts.append("========== DEBUG SNAPSHOT ==========")
+body_parts.append("========== DEBUG SNAPSHOT ==========")
 
-          if os.path.exists(snapshot):
-              with open(snapshot, "r", errors="replace") as f:
-                  data = f.read()
+if os.path.exists(snapshot):
+    with open(snapshot, "r", errors="replace") as f:
+        data = f.read()
 
-              max_chars = 150000
-              if len(data) > max_chars:
-                  body_parts.append(f"[LOG TRUNCATED. Showing last {max_chars} chars.]")
-                  data = data[-max_chars:]
+    max_chars = 150000
+    if len(data) > max_chars:
+        body_parts.append(f"[LOG TRUNCATED. Showing last {max_chars} chars.]")
+        data = data[-max_chars:]
 
-              body_parts.append(data)
-          else:
-              body_parts.append("DEBUG SNAPSHOT FILE MISSING")
+    body_parts.append(data)
+else:
+    body_parts.append("DEBUG SNAPSHOT FILE MISSING")
 
-          body_parts.append("")
-          body_parts.append("========== RAW RUN LOG ==========")
+body_parts.append("")
+body_parts.append("========== RAW RUN LOG ==========")
 
-          if os.path.exists(run_log):
-              with open(run_log, "r", errors="replace") as f:
-                  raw = f.read()
+if os.path.exists(run_log):
+    with open(run_log, "r", errors="replace") as f:
+        raw = f.read()
 
-              max_raw_chars = 80000
-              if len(raw) > max_raw_chars:
-                  body_parts.append(f"[RAW LOG TRUNCATED. Showing last {max_raw_chars} chars.]")
-                  raw = raw[-max_raw_chars:]
+    max_raw_chars = 80000
+    if len(raw) > max_raw_chars:
+        body_parts.append(f"[RAW LOG TRUNCATED. Showing last {max_raw_chars} chars.]")
+        raw = raw[-max_raw_chars:]
 
-              body_parts.append(raw)
-          else:
-              body_parts.append("RAW RUN LOG FILE MISSING")
+    body_parts.append(raw)
+else:
+    body_parts.append("RAW RUN LOG FILE MISSING")
 
-          body = "\n".join(body_parts)
+body = "\n".join(body_parts)
 
-          msg = MIMEMultipart()
-          msg["From"] = email_from
-          msg["To"] = email_to
-          msg["Subject"] = f"GitHub Actions Debug — {workflow} — run {run_number} — {job_status}"
+msg = MIMEMultipart()
+msg["From"] = email_from
+msg["To"] = email_to
+msg["Subject"] = f"GitHub Actions Debug — {workflow} — run {run_number} — {job_status}"
 
-          msg.attach(MIMEText(body, "plain", "utf-8"))
+msg.attach(MIMEText(body, "plain", "utf-8"))
 
-          try:
-              print("Trying to send email...")
-              with smtplib.SMTP("smtp.gmail.com", 587) as server:
-                  server.starttls()
-                  server.login(email_from, email_password)
-                  server.sendmail(email_from, email_to, msg.as_string())
-              print("EMAIL SENT")
-          except Exception as e:
-              print(f"EMAIL FAILED: {e}")
-
-          PY
+try:
+    print("Trying to send email...")
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.starttls()
+        server.login(email_from, email_password)
+        server.sendmail(email_from, email_to, msg.as_string())
+    print("EMAIL SENT")
+except Exception as e:
+    print(f"EMAIL FAILED: {e}")
+PY
 
       # --------------------------------------------------------------
       # 🔟 Clean temporary files
