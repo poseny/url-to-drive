@@ -1,18 +1,21 @@
-name: "Upload URL to Google Drive (clean links, no zip)"
+name: Upload URL → Google Drive (clean links, no zip, with JS)
 
+# --------------------------------------------------------------
+#  Trigger – רק מריץ ידנית מה‑UI של GitHub
+# --------------------------------------------------------------
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "URL of media file or HTML page"
+        description: "כתובת URL של דף HTML (לדוגמה – MediaSearch של Wikimedia)"
         required: true
-        default: "https://commons.wikimedia.org/wiki/File:Bilby_Looking_for_food_at_night.webm"
+        default: "https://commons.wikimedia.org/w/index.php?title=Special%3AMediaSearch&search=%D7%9B%D7%9C%D7%91&ns0=1&ns6=1&fulltext=Search&type=video"
       folder:
-        description: "Target folder in Drive (no filename)"
+        description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
         required: true
         default: "MyUploads"
       filename:
-        description: "Base filename (no extension). If empty, taken from URL/page title"
+        description: "שם קובץ לבסיס (בלי סיומת). אם ריק – ייקח מכותרת העמוד"
         required: false
         default: ""
 
@@ -20,15 +23,32 @@ jobs:
   upload:
     runs-on: ubuntu-latest
     steps:
+      # ----------------------------------------------------------------
+      # 0️⃣  Checkout – רק בשביל שה‑UI של GitHub יראה את ה‑workflow
+      # ----------------------------------------------------------------
       - name: Checkout repository (required for UI)
         uses: actions/checkout@v3
 
-      - name: Install rclone and lynx
+      # ----------------------------------------------------------------
+      # 1️⃣  Install rclone, node, npm and playwright (כולל Chromium)
+      # ----------------------------------------------------------------
+      - name: Install tools
         run: |
+          # ---- rclone -------------------------------------------------
           curl -s https://rclone.org/install.sh | sudo bash
-          sudo apt-get update -qq
-          sudo apt-get install -y lynx
 
+          # ---- apt‑get ------------------------------------------------
+          sudo apt-get update -qq
+          sudo apt-get install -y nodejs npm lynx
+
+          # ---- playwright ---------------------------------------------
+          npm install -g playwright
+          playwright install chromium   # only the headless browser we need
+        shell: bash
+
+      # ----------------------------------------------------------------
+      # 2️⃣  Write rclone config (remote בשם gdrive)
+      # ----------------------------------------------------------------
       - name: Write rclone config
         env:
           RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
@@ -40,146 +60,154 @@ jobs:
           scope = drive.file
           token = $RCLONE_GDRIVE_TOKEN
           EOF
+        shell: bash
 
-      - name: Resolve content-type and base name
+      # ----------------------------------------------------------------
+      # 3️⃣  Resolve a base name for the output file (title of page או שם שסופק)
+      # ----------------------------------------------------------------
+      - name: Resolve base name
         id: resolve
         env:
           FILE_URL: ${{ github.event.inputs.url }}
           USER_NAME: ${{ github.event.inputs.filename }}
         run: |
-          set -e
-
-          CONTENT_TYPE=$(curl -sI -L "$FILE_URL" \
-                          | awk -F': ' '/^[Cc]ontent-[Tt]ype/ {print $2}' \
-                          | tr -d '\r')
-          echo "Content-Type = $CONTENT_TYPE"
+          set -euo pipefail
 
           if [[ -n "$USER_NAME" ]]; then
             BASE_NAME="$USER_NAME"
           else
-            if [[ "$CONTENT_TYPE" == text/html* ]]; then
-              PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin | head -n 1)
-              CLEAN_TITLE=$(echo "$PAGE_TITLE" | tr -cd '[:alnum:] _-')
-              BASE_NAME="${CLEAN_TITLE:-page}"
-            else
-              raw_name=$(basename "$FILE_URL")
-              raw_name=${raw_name%%\?*}
-              BASE_NAME="${raw_name%.*}"
-            fi
+            # נשתמש ב‑lynx כדי לקרוא את <title> (לא דורש JavaScript)
+            PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin | head -n 1)
+            CLEAN_TITLE=$(echo "$PAGE_TITLE" | tr -cd '[:alnum:] _-')
+            BASE_NAME="${CLEAN_TITLE:-page}"
           fi
 
-          echo "Base name = $BASE_NAME"
           echo "base_name=$BASE_NAME" >> $GITHUB_OUTPUT
-          echo "content_type=$CONTENT_TYPE" >> $GITHUB_OUTPUT
           echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> $GITHUB_OUTPUT
+        shell: bash
 
+      # ----------------------------------------------------------------
+      # 4️⃣  Create temporary working directory (ה‑runner ינקה אוטומטית)
+      # ----------------------------------------------------------------
       - name: Create temporary directory
         id: tmpdir
         run: |
           TMPDIR=$(mktemp -d)
           echo "tmpdir=$TMPDIR" >> $GITHUB_OUTPUT
+        shell: bash
 
-      - name: Download, extract clean links, upload
+      # ----------------------------------------------------------------
+      # 5️⃣  Extract **ALL** media links with Playwright (כולל infinite scroll)
+      # ----------------------------------------------------------------
+      - name: Extract links with Playwright
+        id: extract
         env:
           FILE_URL: ${{ github.event.inputs.url }}
-          CONTENT_TYPE: ${{ steps.resolve.outputs.content_type }}
-          BASE_NAME: ${{ steps.resolve.outputs.base_name }}
-          REMOTE_BASE: ${{ steps.resolve.outputs.remote_base }}
           TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
         run: |
-          set -e
-          set -o pipefail
+          set -euo pipefail
           cd "$TMPDIR"
 
-          if [[ "$CONTENT_TYPE" != text/html* ]]; then
-            echo "Downloading media file -> $BASE_NAME"
-            curl -L -s -o "$BASE_NAME" "$FILE_URL"
+          # --------- 5.1. כתיבת קובץ JavaScript ----------
+          cat > scrape.js <<'EOF'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          const path = require('path');
 
-            echo "Uploading media file directly to Drive"
-            rclone copy "$BASE_NAME" "$REMOTE_BASE" --progress
+          const url = process.env.FILE_URL;
+          if (!url) {
+            console.error('❌ FILE_URL is missing');
+            process.exit(1);
+          }
 
-          else
-            echo "Downloading HTML page"
-            curl -L -s -o "page.html" "$FILE_URL"
+          // סיומות המדיה שאנחנו רוצים
+          const mediaExt = [
+            'webm','mp4','mkv','mov','avi','flv','wmv',
+            'jpg','jpeg','png','gif','svg','bmp','tif','tiff',
+            'pdf','mp3','ogg','wav','flac','aac'
+          ];
+          const mediaRegex = new RegExp(`https?://[^"\\s]+\\.(${mediaExt.join('|')})([?&#].*)?$`, 'i');
 
-            echo "Extracting direct media links"
-            MEDIA_REGEX='https?://[^"'"'"' ]+\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)'
+          const clean = (u) => u.split(/[?&#]/)[0];
 
-            grep -Eo "$MEDIA_REGEX" "page.html" \
-                | sed -E 's/[?&#].*$//' \
-                | sort -u > "links.txt"
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
 
-            if [[ "$FILE_URL" == *"commons.wikimedia.org"*"Special%3AMediaSearch"* ]]; then
-              echo "Detected Wikimedia Commons MediaSearch page"
+            const found = new Set();
 
-              SEARCH_QUERY=$(echo "$FILE_URL" \
-                | sed -E 's/.*search=([^&]+).*/\1/' \
-                | python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote_plus(sys.stdin.read().strip()))')
+            // 1️⃣ קולט תגובות רשת של קבצים מדיה
+            page.on('response', async (resp) => {
+              const u = resp.url();
+              if (mediaRegex.test(u)) found.add(clean(u));
+            });
 
-              echo "Search query = $SEARCH_QUERY"
+            console.log(`🌐 Opening ${url}`);
+            await page.goto(url, { waitUntil: 'networkidle' });
 
-              > "api_links.txt"
-              PAGES=5
-              LIMIT=50
+            // 2️⃣ גלילה אינסופית – עד שלא מתגלה עוד שינוי בגובה
+            let previousHeight = 0;
+            while (true) {
+              const newHeight = await page.evaluate('document.body.scrollHeight');
+              if (newHeight === previousHeight) break;
+              previousHeight = newHeight;
+              await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
+              await page.waitForTimeout(1500);   // זמן ל‑lazy‑load
+            }
 
-              for (( i=1; i<=PAGES; i++ )); do
-                OFFSET=$(( (i - 1) * LIMIT ))
-                API_URL="https://commons.wikimedia.org/w/api.php?action=query&list=search&srsearch=${SEARCH_QUERY// /%20}&srlimit=${LIMIT}&sroffset=${OFFSET}&format=json"
+            // 3️⃣ קישורים רק ב‑DOM (למשל <a href="…">)
+            const domLinks = await page.$$eval('a[href]', els => els.map(e => e.href));
+            domLinks.forEach(l => {
+              if (mediaRegex.test(l)) found.add(clean(l));
+            });
 
-                echo "Fetching API page $i / $PAGES (offset=$OFFSET)"
-                curl -sL "$API_URL" -o "api_page_$i.json"
+            await browser.close();
 
-                python3 - <<'PY'
-import json
-import re
-import urllib.parse
-from pathlib import Path
+            const sorted = Array.from(found).sort();
+            const outPath = path.resolve('links.txt');
+            if (sorted.length === 0) {
+              console.warn('⚠️ No media links detected – writing placeholder file');
+              fs.writeFileSync(outPath, 'No direct media links found on this page.\n');
+            } else {
+              fs.writeFileSync(outPath, sorted.join('\n') + '\n');
+            }
+            console.log(`✅ Extracted ${sorted.length} unique media link(s) → ${outPath}`);
+          })().catch(err => {
+            console.error('🚨 Unexpected error:', err);
+            process.exit(1);
+          });
+          EOF
 
-media_ext = re.compile(
-    r'\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)(?=\?|&|"|\s|$)',
-    re.IGNORECASE
-)
+          # --------- 5.2. הרצת הקובץ ----------
+          echo "🚀 Running Playwright scraper …"
+          node scrape.js
 
-links = set()
-for path in Path('.').glob('api_page_*.json'):
-    try:
-        data = json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
-        continue
+          # --------- 5.3. חשיפת הקובץ לשאר ה‑steps ----------
+          LINKS_FILE="$(pwd)/links.txt"
+          echo "links_path=$LINKS_FILE" >> $GITHUB_OUTPUT
+          echo "📄 ראשיי 10 שורות של links.txt:"
+          head -n 10 "$LINKS_FILE" || true
+        shell: bash
 
-    for item in data.get('query', {}).get('search', []):
-        text = json.dumps(item, ensure_ascii=False)
-        for m in media_ext.finditer(text):
-            start = text.rfind('http', 0, m.start())
-            if start != -1:
-                end = m.end()
-                url = text[start:end]
-                url = urllib.parse.unquote(url)
-                url = re.sub(r'[?#].*$', '', url)
-                links.add(url)
+      # ----------------------------------------------------------------
+      # 6️⃣  העלאת קובץ links.txt ל‑Google Drive
+      # ----------------------------------------------------------------
+      - name: Upload links file to Drive
+        env:
+          REMOTE_BASE: ${{ steps.resolve.outputs.remote_base }}
+          LINKS_FILE: ${{ steps.extract.outputs.links_path }}
+        run: |
+          set -euo pipefail
+          rclone copy "$LINKS_FILE" "${REMOTE_BASE}.txt" --progress
+        shell: bash
 
-Path('api_links.txt').write_text('\n'.join(sorted(links)) + '\n', encoding='utf-8')
-PY
-
-                if [[ -s "api_links.txt" ]]; then
-                  cat "api_links.txt" >> "links.txt"
-                fi
-              done
-
-              sort -u "links.txt" -o "links.txt"
-            fi
-
-            if [[ ! -s "links.txt" ]]; then
-              echo "No clean direct media links were found on the page." > "links.txt"
-            fi
-
-            echo "Uploading the cleaned links file as ${BASE_NAME}.txt"
-            rclone copy "links.txt" "${REMOTE_BASE}.txt" --progress
-          fi
-
+      # ----------------------------------------------------------------
+      # 7️⃣  ניקוי (ה‑runner מנקה /tmp אוטומטית)
+      # ----------------------------------------------------------------
       - name: Clean temporary files
         if: always()
         env:
           TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
         run: |
           rm -rf "$TMPDIR" || true
+        shell: bash
