@@ -1,6 +1,5 @@
 name: Upload URL → Google Drive (clean links, no zip)
 
-# הרצה ידנית מה‑UI של GitHub
 on:
   workflow_dispatch:
     inputs:
@@ -22,13 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # --------------------------------------------------------------
-      # 0️⃣  Checkout – רק בשביל שה‑UI של GitHub יראה את ה‑workflow
+      # 0️⃣ Checkout – רק בשביל שה‑UI של GitHub תראה את ה‑workflow
       # --------------------------------------------------------------
       - name: Checkout repository (required for UI)
         uses: actions/checkout@v3
 
       # --------------------------------------------------------------
-      # 1️⃣  Install rclone + lynx (חילוץ כותרת HTML)
+      # 1️⃣ Install rclone + lynx (חילוץ כותרת HTML)
       # --------------------------------------------------------------
       - name: Install rclone and lynx
         run: |
@@ -37,7 +36,7 @@ jobs:
           sudo apt-get install -y lynx
 
       # --------------------------------------------------------------
-      # 2️⃣  Write rclone config (remote בשם gdrive)
+      # 2️⃣ Write rclone config (remote בשם gdrive)
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
@@ -52,7 +51,7 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣  Resolve content‑type ובחירת שם בסיס (base name)
+      # 3️⃣ Resolve content‑type ובחירת שם בסיס (base name)
       # --------------------------------------------------------------
       - name: Resolve content‑type & base name
         id: resolve
@@ -63,9 +62,9 @@ jobs:
           set -e
 
           # 3.1 – קבלת Content‑Type
-          CONTENT_TYPE=$(curl -sI -L "$FILE_URL" \
-                          | awk -F': ' '/^[Cc]ontent-[Tt]ype/ {print $2}' \
-                          | tr -d '\r')
+          CONTENT_TYPE=$(curl -sI -L "$FILE_URL" |
+                         awk -F': ' '/^[Cc]ontent-[Tt]ype/ {print $2}' |
+                         tr -d '\r')
           echo "🕵️ Content‑Type = $CONTENT_TYPE"
 
           # 3.2 – בחירת שם בסיס (Base name)
@@ -73,7 +72,9 @@ jobs:
             BASE_NAME="$USER_NAME"
           else
             if [[ "$CONTENT_TYPE" == text/html* ]]; then
-              PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin | head -n 1)
+              PAGE_TITLE=$(curl -sL "$FILE_URL" |
+                           lynx -dump -force_html -nolist -stdin |
+                           head -n 1)
               CLEAN_TITLE=$(echo "$PAGE_TITLE" | tr -cd '[:alnum:] _-')
               BASE_NAME="${CLEAN_TITLE:-page}"
             else
@@ -89,7 +90,7 @@ jobs:
           echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 4️⃣  Create temporary working directory
+      # 4️⃣ Create temporary working directory
       # --------------------------------------------------------------
       - name: Create temporary directory
         id: tmpdir
@@ -98,7 +99,7 @@ jobs:
           echo "tmpdir=$TMPDIR" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 5️⃣  Download / extract clean links / upload (no zip)
+      # 5️⃣ Download / extract clean links / upload (no zip)
       # --------------------------------------------------------------
       - name: Download / extract clean links / upload (no zip)
         env:
@@ -128,17 +129,17 @@ jobs:
               echo "🔎 Extracting direct media links"
               MEDIA_REGEX='https?://[^" ]+\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)'
 
-              grep -Eo "$MEDIA_REGEX" "page.html" \
-                  | sed -E 's/[?&#].*$//' \
-                  | sort -u > "links.txt"
+              grep -Eo "$MEDIA_REGEX" "page.html" |
+                sed -E 's/[?&#].*$//' |
+                sort -u > "links.txt"
 
               # --- Wikimedia Commons MediaSearch ---
               if [[ "$FILE_URL" == *"commons.wikimedia.org"*"Special%3AMediaSearch"* ]]; then
                 echo "🔎 Detected Wikimedia Commons MediaSearch page"
 
-                SEARCH_QUERY=$(echo "$FILE_URL" \
-                  | sed -E 's/.*search=([^&]+).*/\1/' \
-                  | python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote_plus(sys.stdin.read().strip()))')
+                SEARCH_QUERY=$(echo "$FILE_URL" |
+                  sed -E 's/.*search=([^&]+).*/\1/' |
+                  python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote_plus(sys.stdin.read().strip()))')
 
                 echo "🔎 Search query = $SEARCH_QUERY"
 
