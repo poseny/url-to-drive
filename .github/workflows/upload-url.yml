@@ -125,13 +125,34 @@ jobs:
           echo "=== WRITE RCLONE CONFIG END ==="
 
       # --------------------------------------------------------------
-      # 5️⃣ Resolve content-type ובחירת שם בסיס
+      # 5️⃣ Create temporary directory
+      # --------------------------------------------------------------
+      - name: Create temporary directory
+        id: tmpdir
+        run: |
+          set -e
+          set -o pipefail
+
+          RUN_LOG="${RUN_LOG:-/tmp/upload_project_debug.log}"
+          exec > >(tee -a "$RUN_LOG") 2>&1
+
+          echo "=== CREATE TMPDIR START ==="
+
+          TMPDIR=$(mktemp -d)
+          echo "tmpdir=$TMPDIR" >> "$GITHUB_OUTPUT"
+
+          echo "TMPDIR=$TMPDIR"
+          echo "=== CREATE TMPDIR END ==="
+
+      # --------------------------------------------------------------
+      # 6️⃣ Resolve content-type ובחירת שם בסיס
       # --------------------------------------------------------------
       - name: Resolve content-type & base name
         id: resolve
         env:
           FILE_URL: ${{ github.event.inputs.url }}
           USER_NAME: ${{ github.event.inputs.filename }}
+          TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
         run: |
           set -e
           set -o pipefail
@@ -142,6 +163,7 @@ jobs:
           echo "=== RESOLVE START ==="
           echo "FILE_URL=$FILE_URL"
           echo "USER_NAME=$USER_NAME"
+          echo "TMPDIR=$TMPDIR"
 
           USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
@@ -164,27 +186,21 @@ jobs:
           echo "🕵️ Content-Type = $CONTENT_TYPE"
           echo "IS_HTML_URL = $IS_HTML_URL"
 
+          cat > "$TMPDIR/sanitize_name.py" <<'PY'
+          import sys, re
+          s = sys.argv[1].strip()
+          s = re.sub(r'[\\/:*?"<>|]+', '_', s)
+          s = re.sub(r'\s+', ' ', s)
+          print((s[:120] or "page").strip())
+          PY
+
           if [[ -n "$USER_NAME" ]]; then
-            BASE_NAME=$(python3 - "$USER_NAME" <<'PY'
-import sys, re
-s = sys.argv[1].strip()
-s = re.sub(r'[\\/:*?"<>|]+', '_', s)
-s = re.sub(r'\s+', ' ', s)
-print((s[:120] or "page").strip())
-PY
-            )
+            BASE_NAME=$(python3 "$TMPDIR/sanitize_name.py" "$USER_NAME")
           else
             if [[ "$IS_HTML_URL" == "true" ]]; then
               PAGE_TITLE=$(curl -sL -A "$USER_AGENT" "$FILE_URL" | lynx -dump -force_html -nolist -stdin 2>/dev/null | head -n 1 || true)
 
-              BASE_NAME=$(python3 - "$PAGE_TITLE" <<'PY'
-import sys, re
-s = sys.argv[1].strip()
-s = re.sub(r'[\\/:*?"<>|]+', '_', s)
-s = re.sub(r'\s+', ' ', s)
-print((s[:120] or "page").strip())
-PY
-              )
+              BASE_NAME=$(python3 "$TMPDIR/sanitize_name.py" "$PAGE_TITLE")
             else
               raw_name=$(basename "$FILE_URL")
               raw_name=${raw_name%%\?*}
@@ -200,26 +216,6 @@ PY
           echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> "$GITHUB_OUTPUT"
 
           echo "=== RESOLVE END ==="
-
-      # --------------------------------------------------------------
-      # 6️⃣ Create temporary working directory
-      # --------------------------------------------------------------
-      - name: Create temporary directory
-        id: tmpdir
-        run: |
-          set -e
-          set -o pipefail
-
-          RUN_LOG="${RUN_LOG:-/tmp/upload_project_debug.log}"
-          exec > >(tee -a "$RUN_LOG") 2>&1
-
-          echo "=== CREATE TMPDIR START ==="
-
-          TMPDIR=$(mktemp -d)
-          echo "tmpdir=$TMPDIR" >> "$GITHUB_OUTPUT"
-
-          echo "TMPDIR=$TMPDIR"
-          echo "=== CREATE TMPDIR END ==="
 
       # --------------------------------------------------------------
       # 7️⃣ Download / scroll / extract clean links / upload
@@ -265,314 +261,314 @@ PY
 
           # ------------------- דף HTML ----------------------------
           else
-            cat > extract_links.js <<'NODE'
-const { chromium } = require('playwright');
-const fs = require('fs');
+            cat > "$TMPDIR/extract_links.js" <<'NODE'
+            const { chromium } = require('playwright');
+            const fs = require('fs');
 
-const fileUrl = process.env.FILE_URL;
-const passes = Math.max(1, Number(process.env.SCROLL_PASSES || '30'));
-const waitMs = Math.max(250, Number(process.env.SCROLL_WAIT_MS || '2500'));
+            const fileUrl = process.env.FILE_URL;
+            const passes = Math.max(1, Number(process.env.SCROLL_PASSES || '30'));
+            const waitMs = Math.max(250, Number(process.env.SCROLL_WAIT_MS || '2500'));
 
-const mediaExt = /\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)(?:[?#].*)?$/i;
-
-const directLinks = new Set();
+            const mediaExt = /\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)(?:[?#].*)?$/i;
+
+            const directLinks = new Set();
 
-function cleanUrl(raw) {
-  if (!raw || typeof raw !== 'string') return null;
-
-  let u = raw.trim();
-  if (!u) return null;
-
-  u = u.replace(/^["']|["']$/g, '');
-  u = u.replace(/&amp;/g, '&');
-  u = u.replace(/[)}\].,;]+$/, '');
-
-  if (u.startsWith('//')) u = 'https:' + u;
-  if (u.startsWith('/')) u = 'https://commons.wikimedia.org' + u;
-
-  try {
-    const parsed = new URL(u);
-
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return null;
-    }
-
-    parsed.hash = '';
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-}
-
-function isCommonsFilePage(parsed) {
-  return /(^|\.)commons\.wikimedia\.org$/i.test(parsed.hostname) &&
-         /^\/wiki\/File:/i.test(parsed.pathname);
-}
-
-function addDirect(raw) {
-  const parts = String(raw).split(',');
-
-  for (const part of parts) {
-    const token = part.trim().split(/\s+/)[0];
-    const u = cleanUrl(token);
-
-    if (!u) continue;
-
-    let p;
-    try {
-      p = new URL(u);
-    } catch {
-      continue;
-    }
-
-    // דפי קובץ הם HTML, לא קישור ישיר לקובץ
-    if (isCommonsFilePage(p)) continue;
-
-    if (mediaExt.test(u)) {
-      directLinks.add(u);
-    }
-  }
-}
-
-function addFilePage(raw) {
-  const u = cleanUrl(raw);
-  if (!u) return;
-
-  let p;
-  try {
-    p = new URL(u);
-  } catch {
-    return;
-  }
-
-  if (!/(^|\.)commons\.wikimedia\.org$/i.test(p.hostname)) return;
-  if (!/^\/wiki\/File:/i.test(p.pathname)) return;
-
-  let title;
-  try {
-    title = decodeURIComponent(p.pathname.replace(/^\/wiki\/File:/i, ''));
-  } catch {
-    title = p.pathname.replace(/^\/wiki\/File:/i, '');
-  }
-
-  if (!/\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)(?:[?#].*)?$/i.test(title)) {
-    return;
-  }
-
-  const safe = encodeURIComponent(title).replace(/%20/g, '_');
-
-  // קישור הורדה ישיר ב־Commons. הוא מפנה לקובץ המקורי.
-  directLinks.add(`https://commons.wikimedia.org/wiki/Special:Redirect/file/${safe}`);
-}
-
-function extractText(text) {
-  if (!text || typeof text !== 'string') return;
-
-  const normalized = text.replace(/\\\//g, '/');
-
-  // קישורי מדיה ישירים
-  for (const m of normalized.matchAll(/https?:\/\/[^\s"'<>\\]+/gi)) {
-    addDirect(m[0]);
-  }
-
-  // דפי קובץ מ־Commons
-  for (const m of normalized.matchAll(/https?:\/\/commons\.wikimedia\.org\/wiki\/File:[^\s"'<>\\]+/gi)) {
-    addFilePage(m[0]);
-  }
-
-  // דפי קובץ יחסיים
-  for (const m of normalized.matchAll(/\/wiki\/File:[^\s"'<>\\]+/gi)) {
-    addFilePage(m[0]);
-  }
-}
-
-async function collectFromPage(page) {
-  const values = await page.evaluate(() => {
-    const attrs = [
-      'href',
-      'src',
-      'data-src',
-      'data-url',
-      'data-file-url',
-      'data-original',
-      'data-original-url',
-      'data-media-url',
-      'data-href',
-      'data-file',
-      'data-thumb-url',
-      'srcset',
-      'data-srcset'
-    ];
-
-    const selectors = [
-      'a[href]',
-      'img',
-      'video',
-      'source',
-      'meta[property="og:image"]',
-      'meta[name="twitter:image"]',
-      '[src]',
-      '[data-src]',
-      '[data-url]',
-      '[data-file-url]',
-      '[data-original]',
-      '[data-original-url]',
-      '[data-media-url]',
-      '[data-href]',
-      '[data-file]',
-      '[data-thumb-url]'
-    ].join(',');
-
-    const out = [];
-
-    document.querySelectorAll(selectors).forEach(el => {
-      for (const a of attrs) {
-        const v = el.getAttribute(a);
-        if (v) out.push(v);
-      }
-
-      const srcset = el.getAttribute('srcset');
-      if (srcset) out.push(srcset);
-
-      const dataSrcset = el.getAttribute('data-srcset');
-      if (dataSrcset) out.push(dataSrcset);
-    });
-
-    const bodyText = document.body
-      ? (document.body.innerText || document.body.textContent || '')
-      : '';
-
-    if (bodyText) out.push(bodyText);
-
-    document.querySelectorAll('script').forEach(script => {
-      const t = script.textContent || '';
-
-      if (
-        t.includes('commons.wikimedia.org') ||
-        /\/wiki\/File:|Special:Redirect\/file|\.webm|\.mp4|\.jpg|\.png|\.gif/i.test(t)
-      ) {
-        out.push(t);
-      }
-    });
-
-    return out;
-  });
-
-  for (const v of values) {
-    extractText(v);
-  }
-}
-
-async function clickLoadMore(page) {
-  const selectors = [
-    'button:has-text("Load more")',
-    'button:has-text("טען עוד")',
-    'button:has-text("טוען עוד")',
-    'button:has-text("עוד תוצאות")',
-    'a:has-text("Load more")',
-    'a:has-text("טען עוד")',
-    'a:has-text("טוען עוד")',
-    'a:has-text("עוד תוצאות")',
-    '[class*="load-more"]',
-    '[class*="LoadMore"]'
-  ];
-
-  for (const selector of selectors) {
-    const loc = page.locator(selector).first();
-
-    if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await loc.click({ timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(800);
-    }
-  }
-}
-
-(async () => {
-  if (!fileUrl) {
-    throw new Error('FILE_URL is empty');
-  }
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
-
-  const page = await browser.newPage({
-    viewport: { width: 1440, height: 1200 },
-    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
-  });
-
-  page.setDefaultTimeout(60000);
-
-  console.log(`Opening: ${fileUrl}`);
-
-  await page.goto(fileUrl, {
-    waitUntil: 'domcontentloaded',
-    timeout: 120000
-  });
-
-  await page.waitForTimeout(3000);
-
-  await page.waitForSelector(
-    'a[href*="/wiki/File:"], a[href*="Special:Redirect/file"]',
-    { timeout: 60000 }
-  ).catch(() => {
-    console.log('No file links found yet; continuing anyway.');
-  });
-
-  await collectFromPage(page);
-
-  for (let i = 0; i < passes; i++) {
-    await page.evaluate((step) => {
-      const h = window.innerHeight || 900;
-      const scrollStep = Math.max(700, Math.floor(h * 0.85));
-
-      window.scrollBy(0, scrollStep);
-
-      if (window.scrollY >= document.documentElement.scrollHeight - h - 10) {
-        window.scrollTo(0, 0);
-        window.scrollBy(0, scrollStep * (step + 1));
-      }
-    }, i);
-
-    await page.waitForTimeout(waitMs);
-
-    await clickLoadMore(page);
-
-    await page.waitForTimeout(Math.min(1000, waitMs));
-
-    await collectFromPage(page);
-
-    console.log(`pass ${i + 1}/${passes}: direct links=${directLinks.size}`);
-  }
-
-  await page.evaluate(() => {
-    window.scrollTo(0, document.documentElement.scrollHeight);
-  });
-
-  await page.waitForTimeout(2000);
-  await collectFromPage(page);
-
-  await browser.close();
-
-  const lines = [...directLinks].sort();
-
-  if (lines.length === 0) {
-    fs.writeFileSync('links.txt', 'No clean direct media links were found on the page.\n');
-  } else {
-    fs.writeFileSync('links.txt', lines.join('\n') + '\n');
-  }
-
-  console.log(`Found ${lines.length} direct media links`);
-})().catch(err => {
-  console.error(err);
-  fs.writeFileSync('links.txt', `Error extracting links: ${err.message}\n`);
-  process.exit(1);
-});
-NODE
+            function cleanUrl(raw) {
+              if (!raw || typeof raw !== 'string') return null;
+
+              let u = raw.trim();
+              if (!u) return null;
+
+              u = u.replace(/^["']|["']$/g, '');
+              u = u.replace(/&amp;/g, '&');
+              u = u.replace(/[)}\].,;]+$/, '');
+
+              if (u.startsWith('//')) u = 'https:' + u;
+              if (u.startsWith('/')) u = 'https://commons.wikimedia.org' + u;
+
+              try {
+                const parsed = new URL(u);
+
+                if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+                  return null;
+                }
+
+                parsed.hash = '';
+                return parsed.toString();
+              } catch {
+                return null;
+              }
+            }
+
+            function isCommonsFilePage(parsed) {
+              return /(^|\.)commons\.wikimedia\.org$/i.test(parsed.hostname) &&
+                     /^\/wiki\/File:/i.test(parsed.pathname);
+            }
+
+            function addDirect(raw) {
+              const parts = String(raw).split(',');
+
+              for (const part of parts) {
+                const token = part.trim().split(/\s+/)[0];
+                const u = cleanUrl(token);
+
+                if (!u) continue;
+
+                let p;
+                try {
+                  p = new URL(u);
+                } catch {
+                  continue;
+                }
+
+                // דפי קובץ הם HTML, לא קישור ישיר לקובץ
+                if (isCommonsFilePage(p)) continue;
+
+                if (mediaExt.test(u)) {
+                  directLinks.add(u);
+                }
+              }
+            }
+
+            function addFilePage(raw) {
+              const u = cleanUrl(raw);
+              if (!u) return;
+
+              let p;
+              try {
+                p = new URL(u);
+              } catch {
+                return;
+              }
+
+              if (!/(^|\.)commons\.wikimedia\.org$/i.test(p.hostname)) return;
+              if (!/^\/wiki\/File:/i.test(p.pathname)) return;
+
+              let title;
+              try {
+                title = decodeURIComponent(p.pathname.replace(/^\/wiki\/File:/i, ''));
+              } catch {
+                title = p.pathname.replace(/^\/wiki\/File:/i, '');
+              }
+
+              if (!/\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)(?:[?#].*)?$/i.test(title)) {
+                return;
+              }
+
+              const safe = encodeURIComponent(title).replace(/%20/g, '_');
+
+              // קישור הורדה ישיר ב־Commons. הוא מפנה לקובץ המקורי.
+              directLinks.add(`https://commons.wikimedia.org/wiki/Special:Redirect/file/${safe}`);
+            }
+
+            function extractText(text) {
+              if (!text || typeof text !== 'string') return;
+
+              const normalized = text.replace(/\\\//g, '/');
+
+              // קישורי מדיה ישירים
+              for (const m of normalized.matchAll(/https?:\/\/[^\s"'<>\\]+/gi)) {
+                addDirect(m[0]);
+              }
+
+              // דפי קובץ מ־Commons
+              for (const m of normalized.matchAll(/https?:\/\/commons\.wikimedia\.org\/wiki\/File:[^\s"'<>\\]+/gi)) {
+                addFilePage(m[0]);
+              }
+
+              // דפי קובץ יחסיים
+              for (const m of normalized.matchAll(/\/wiki\/File:[^\s"'<>\\]+/gi)) {
+                addFilePage(m[0]);
+              }
+            }
+
+            async function collectFromPage(page) {
+              const values = await page.evaluate(() => {
+                const attrs = [
+                  'href',
+                  'src',
+                  'data-src',
+                  'data-url',
+                  'data-file-url',
+                  'data-original',
+                  'data-original-url',
+                  'data-media-url',
+                  'data-href',
+                  'data-file',
+                  'data-thumb-url',
+                  'srcset',
+                  'data-srcset'
+                ];
+
+                const selectors = [
+                  'a[href]',
+                  'img',
+                  'video',
+                  'source',
+                  'meta[property="og:image"]',
+                  'meta[name="twitter:image"]',
+                  '[src]',
+                  '[data-src]',
+                  '[data-url]',
+                  '[data-file-url]',
+                  '[data-original]',
+                  '[data-original-url]',
+                  '[data-media-url]',
+                  '[data-href]',
+                  '[data-file]',
+                  '[data-thumb-url]'
+                ].join(',');
+
+                const out = [];
+
+                document.querySelectorAll(selectors).forEach(el => {
+                  for (const a of attrs) {
+                    const v = el.getAttribute(a);
+                    if (v) out.push(v);
+                  }
+
+                  const srcset = el.getAttribute('srcset');
+                  if (srcset) out.push(srcset);
+
+                  const dataSrcset = el.getAttribute('data-srcset');
+                  if (dataSrcset) out.push(dataSrcset);
+                });
+
+                const bodyText = document.body
+                  ? (document.body.innerText || document.body.textContent || '')
+                  : '';
+
+                if (bodyText) out.push(bodyText);
+
+                document.querySelectorAll('script').forEach(script => {
+                  const t = script.textContent || '';
+
+                  if (
+                    t.includes('commons.wikimedia.org') ||
+                    /\/wiki\/File:|Special:Redirect\/file|\.webm|\.mp4|\.jpg|\.png|\.gif/i.test(t)
+                  ) {
+                    out.push(t);
+                  }
+                });
+
+                return out;
+              });
+
+              for (const v of values) {
+                extractText(v);
+              }
+            }
+
+            async function clickLoadMore(page) {
+              const selectors = [
+                'button:has-text("Load more")',
+                'button:has-text("טען עוד")',
+                'button:has-text("טוען עוד")',
+                'button:has-text("עוד תוצאות")',
+                'a:has-text("Load more")',
+                'a:has-text("טען עוד")',
+                'a:has-text("טוען עוד")',
+                'a:has-text("עוד תוצאות")',
+                '[class*="load-more"]',
+                '[class*="LoadMore"]'
+              ];
+
+              for (const selector of selectors) {
+                const loc = page.locator(selector).first();
+
+                if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
+                  await loc.click({ timeout: 5000 }).catch(() => {});
+                  await page.waitForTimeout(800);
+                }
+              }
+            }
+
+            (async () => {
+              if (!fileUrl) {
+                throw new Error('FILE_URL is empty');
+              }
+
+              const browser = await chromium.launch({
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox']
+              });
+
+              const page = await browser.newPage({
+                viewport: { width: 1440, height: 1200 },
+                userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
+              });
+
+              page.setDefaultTimeout(60000);
+
+              console.log(`Opening: ${fileUrl}`);
+
+              await page.goto(fileUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: 120000
+              });
+
+              await page.waitForTimeout(3000);
+
+              await page.waitForSelector(
+                'a[href*="/wiki/File:"], a[href*="Special:Redirect/file"]',
+                { timeout: 60000 }
+              ).catch(() => {
+                console.log('No file links found yet; continuing anyway.');
+              });
+
+              await collectFromPage(page);
+
+              for (let i = 0; i < passes; i++) {
+                await page.evaluate((step) => {
+                  const h = window.innerHeight || 900;
+                  const scrollStep = Math.max(700, Math.floor(h * 0.85));
+
+                  window.scrollBy(0, scrollStep);
+
+                  if (window.scrollY >= document.documentElement.scrollHeight - h - 10) {
+                    window.scrollTo(0, 0);
+                    window.scrollBy(0, scrollStep * (step + 1));
+                  }
+                }, i);
+
+                await page.waitForTimeout(waitMs);
+
+                await clickLoadMore(page);
+
+                await page.waitForTimeout(Math.min(1000, waitMs));
+
+                await collectFromPage(page);
+
+                console.log(`pass ${i + 1}/${passes}: direct links=${directLinks.size}`);
+              }
+
+              await page.evaluate(() => {
+                window.scrollTo(0, document.documentElement.scrollHeight);
+              });
+
+              await page.waitForTimeout(2000);
+              await collectFromPage(page);
+
+              await browser.close();
+
+              const lines = [...directLinks].sort();
+
+              if (lines.length === 0) {
+                fs.writeFileSync('links.txt', 'No clean direct media links were found on the page.\n');
+              } else {
+                fs.writeFileSync('links.txt', lines.join('\n') + '\n');
+              }
+
+              console.log(`Found ${lines.length} direct media links`);
+            })().catch(err => {
+              console.error(err);
+              fs.writeFileSync('links.txt', `Error extracting links: ${err.message}\n`);
+              process.exit(1);
+            });
+            NODE
 
             echo "🧭 Scrolling page and extracting links"
-            node extract_links.js
+            node "$TMPDIR/extract_links.js"
 
             sort -u "links.txt" -o "links.txt"
 
@@ -651,107 +647,107 @@ NODE
           EMAIL_TO: "p0556722432@gmail.com"
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
 
-          RUN_LOG: ${{ env.RUN_LOG }}
-          DEBUG_SNAPSHOT: ${{ env.DEBUG_SNAPSHOT }}
+          RUN_LOG: "/tmp/upload_project_debug.log"
+          DEBUG_SNAPSHOT: "/tmp/upload_project_debug_snapshot.txt"
           TMPDIR_FROM_STEP: ${{ steps.tmpdir.outputs.tmpdir }}
           JOB_STATUS: ${{ job.status }}
         run: |
           set +e
 
           python3 <<'PY'
-import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+          import os
+          import smtplib
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
 
-email_from = os.environ.get("EMAIL_FROM", "").strip()
-email_to = os.environ.get("EMAIL_TO", "").strip()
-email_password = os.environ.get("EMAIL_PASSWORD", "").strip()
+          email_from = os.environ.get("EMAIL_FROM", "").strip()
+          email_to = os.environ.get("EMAIL_TO", "").strip()
+          email_password = os.environ.get("EMAIL_PASSWORD", "").strip()
 
-run_log = os.environ.get("RUN_LOG", "/tmp/upload_project_debug.log")
-snapshot = os.environ.get("DEBUG_SNAPSHOT", "/tmp/upload_project_debug_snapshot.txt")
-tmpdir = os.environ.get("TMPDIR_FROM_STEP", "")
+          run_log = os.environ.get("RUN_LOG", "/tmp/upload_project_debug.log")
+          snapshot = os.environ.get("DEBUG_SNAPSHOT", "/tmp/upload_project_debug_snapshot.txt")
+          tmpdir = os.environ.get("TMPDIR_FROM_STEP", "")
 
-github_server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
-repository = os.environ.get("GITHUB_REPOSITORY", "")
-workflow = os.environ.get("GITHUB_WORKFLOW", "")
-run_id = os.environ.get("GITHUB_RUN_ID", "")
-run_number = os.environ.get("GITHUB_RUN_NUMBER", "")
-job = os.environ.get("GITHUB_JOB", "")
-job_status = os.environ.get("JOB_STATUS", "unknown")
+          github_server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+          repository = os.environ.get("GITHUB_REPOSITORY", "")
+          workflow = os.environ.get("GITHUB_WORKFLOW", "")
+          run_id = os.environ.get("GITHUB_RUN_ID", "")
+          run_number = os.environ.get("GITHUB_RUN_NUMBER", "")
+          job = os.environ.get("GITHUB_JOB", "")
+          job_status = os.environ.get("JOB_STATUS", "unknown")
 
-if not email_from or not email_to or not email_password:
-    print("EMAIL SKIPPED: missing EMAIL_FROM / EMAIL_TO / EMAIL_PASSWORD")
-    raise SystemExit(0)
+          if not email_from or not email_to or not email_password:
+              print("EMAIL SKIPPED: missing EMAIL_FROM / EMAIL_TO / EMAIL_PASSWORD")
+              raise SystemExit(0)
 
-run_url = f"{github_server}/{repository}/actions/runs/{run_id}"
+          run_url = f"{github_server}/{repository}/actions/runs/{run_id}"
 
-body_parts = []
-body_parts.append("GitHub Actions Debug Email")
-body_parts.append("")
-body_parts.append(f"Workflow: {workflow}")
-body_parts.append(f"Repository: {repository}")
-body_parts.append(f"Run ID: {run_id}")
-body_parts.append(f"Run Number: {run_number}")
-body_parts.append(f"Job: {job}")
-body_parts.append(f"Job status: {job_status}")
-body_parts.append(f"Run URL: {run_url}")
-body_parts.append("")
+          body_parts = []
+          body_parts.append("GitHub Actions Debug Email")
+          body_parts.append("")
+          body_parts.append(f"Workflow: {workflow}")
+          body_parts.append(f"Repository: {repository}")
+          body_parts.append(f"Run ID: {run_id}")
+          body_parts.append(f"Run Number: {run_number}")
+          body_parts.append(f"Job: {job}")
+          body_parts.append(f"Job status: {job_status}")
+          body_parts.append(f"Run URL: {run_url}")
+          body_parts.append("")
 
-if tmpdir:
-    body_parts.append(f"TMPDIR: {tmpdir}")
-    body_parts.append("")
+          if tmpdir:
+              body_parts.append(f"TMPDIR: {tmpdir}")
+              body_parts.append("")
 
-body_parts.append("========== DEBUG SNAPSHOT ==========")
+          body_parts.append("========== DEBUG SNAPSHOT ==========")
 
-if os.path.exists(snapshot):
-    with open(snapshot, "r", errors="replace") as f:
-        data = f.read()
+          if os.path.exists(snapshot):
+              with open(snapshot, "r", errors="replace") as f:
+                  data = f.read()
 
-    max_chars = 150000
-    if len(data) > max_chars:
-        body_parts.append(f"[LOG TRUNCATED. Showing last {max_chars} chars.]")
-        data = data[-max_chars:]
+              max_chars = 150000
+              if len(data) > max_chars:
+                  body_parts.append(f"[LOG TRUNCATED. Showing last {max_chars} chars.]")
+                  data = data[-max_chars:]
 
-    body_parts.append(data)
-else:
-    body_parts.append("DEBUG SNAPSHOT FILE MISSING")
+              body_parts.append(data)
+          else:
+              body_parts.append("DEBUG SNAPSHOT FILE MISSING")
 
-body_parts.append("")
-body_parts.append("========== RAW RUN LOG ==========")
+          body_parts.append("")
+          body_parts.append("========== RAW RUN LOG ==========")
 
-if os.path.exists(run_log):
-    with open(run_log, "r", errors="replace") as f:
-        raw = f.read()
+          if os.path.exists(run_log):
+              with open(run_log, "r", errors="replace") as f:
+                  raw = f.read()
 
-    max_raw_chars = 80000
-    if len(raw) > max_raw_chars:
-        body_parts.append(f"[RAW LOG TRUNCATED. Showing last {max_raw_chars} chars.]")
-        raw = raw[-max_raw_chars:]
+              max_raw_chars = 80000
+              if len(raw) > max_raw_chars:
+                  body_parts.append(f"[RAW LOG TRUNCATED. Showing last {max_raw_chars} chars.]")
+                  raw = raw[-max_raw_chars:]
 
-    body_parts.append(raw)
-else:
-    body_parts.append("RAW RUN LOG FILE MISSING")
+              body_parts.append(raw)
+          else:
+              body_parts.append("RAW RUN LOG FILE MISSING")
 
-body = "\n".join(body_parts)
+          body = "\n".join(body_parts)
 
-msg = MIMEMultipart()
-msg["From"] = email_from
-msg["To"] = email_to
-msg["Subject"] = f"GitHub Actions Debug — {workflow} — run {run_number} — {job_status}"
+          msg = MIMEMultipart()
+          msg["From"] = email_from
+          msg["To"] = email_to
+          msg["Subject"] = f"GitHub Actions Debug — {workflow} — run {run_number} — {job_status}"
 
-msg.attach(MIMEText(body, "plain", "utf-8"))
+          msg.attach(MIMEText(body, "plain", "utf-8"))
 
-try:
-    print("Trying to send email...")
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.starttls()
-        server.login(email_from, email_password)
-        server.sendmail(email_from, email_to, msg.as_string())
-    print("EMAIL SENT")
-except Exception as e:
-    print(f"EMAIL FAILED: {e}")
-PY
+          try:
+              print("Trying to send email...")
+              with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                  server.starttls()
+                  server.login(email_from, email_password)
+                  server.sendmail(email_from, email_to, msg.as_string())
+              print("EMAIL SENT")
+          except Exception as e:
+              print(f"EMAIL FAILED: {e}")
+          PY
 
       # --------------------------------------------------------------
       # 🔟 Clean temporary files
