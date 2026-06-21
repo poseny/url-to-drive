@@ -1,6 +1,6 @@
-name: Upload URL → Google Drive (clean links, no zip)
+name: Upload ulr → Google Drive (scroll clean links, no zip)
 
-# הרצה ידנית מה‑UI של GitHub
+# הרצה ידנית מה־UI של GitHub
 on:
   workflow_dispatch:
     inputs:
@@ -8,148 +8,67 @@ on:
         description: "כתובת URL של קובץ מדיה או של דף HTML"
         required: true
         default: "https://commons.wikimedia.org/wiki/File:Bilby_Looking_for_food_at_night.webm"
+
       folder:
-        description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
+        description: "תיקיית יעד ב־Drive, ללא שם קובץ"
         required: true
         default: "MyUploads"
+
       filename:
-        description: "שם קובץ לבסיס (בלי סיומת). אם ריק – ייקח מה‑URL/כותרת הדף"
+        description: "שם קובץ לבסיס, בלי סיומת. אם ריק – ייקח מה־URL/כותרת הדף"
         required: false
         default: ""
+
+      scroll_passes:
+        description: "כמה פעמים לגלול למטה בדף"
+        required: false
+        default: "20"
+
+      scroll_wait_ms:
+        description: "זמן המתנה אחרי כל גלילה, באלפיות שנייה"
+        required: false
+        default: "1500"
 
 jobs:
   upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+
     steps:
       # --------------------------------------------------------------
-      # 0️⃣  Checkout – רק בשביל שה‑UI של GitHub יראה את ה‑workflow
+      # 0️⃣ Checkout – רק כדי שה־UI של GitHub יראה את ה־workflow
       # --------------------------------------------------------------
-      - name: Checkout repository (required for UI)
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       # --------------------------------------------------------------
-      # 1️⃣  Install rclone + lynx (חילוץ כותרת HTML)
+      # 1️⃣ Node.js + rclone + Playwright
       # --------------------------------------------------------------
-      - name: Install rclone and lynx
-        run: |
-          curl -s https://rclone.org/install.sh | sudo bash
-          sudo apt-get update -qq
-          sudo apt-get install -y lynx
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-      # --------------------------------------------------------------
-      # 2️⃣  Write rclone config (remote בשם gdrive)
-      # --------------------------------------------------------------
-      - name: Write rclone config
-        env:
-          RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
-        run: |
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
-          [gdrive]
-          type = drive
-          scope = drive.file
-          token = $RCLONE_GDRIVE_TOKEN
-          EOF
-
-      # --------------------------------------------------------------
-      # 3️⃣  Resolve content‑type ובחירת שם בסיס (base name)
-      # --------------------------------------------------------------
-      - name: Resolve content‑type & base name
-        id: resolve
-        env:
-          FILE_URL: ${{ github.event.inputs.url }}
-          USER_NAME: ${{ github.event.inputs.filename }}
-        run: |
-          set -e
-
-          # --- 3.1 – קבלת Content‑Type ----------------------------
-          CONTENT_TYPE=$(curl -sI -L "$FILE_URL" \
-                          | awk -F': ' '/^[Cc]ontent-[Tt]ype/ {print $2}' \
-                          | tr -d '\r')
-          echo "🕵️ Content‑Type = $CONTENT_TYPE"
-
-          # --- 3.2 – בחירת שם בסיס (Base name) -------------------
-          if [[ -n "$USER_NAME" ]]; then
-            BASE_NAME="$USER_NAME"
-          else
-            if [[ "$CONTENT_TYPE" == text/html* ]]; then
-              # דף HTML – חילוץ <title>
-              PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin | head -n 1)
-              CLEAN_TITLE=$(echo "$PAGE_TITLE" | tr -cd '[:alnum:] _-')
-              BASE_NAME="${CLEAN_TITLE:-page}"
-            else
-              # קובץ מדיה – שם קובץ מה‑URL ללא סיומת
-              raw_name=$(basename "$FILE_URL")
-              raw_name=${raw_name%%\?*}
-              BASE_NAME="${raw_name%.*}"
-            fi
-          fi
-
-          echo "🔤 Base name = $BASE_NAME"
-          echo "base_name=$BASE_NAME" >> $GITHUB_OUTPUT
-          echo "content_type=$CONTENT_TYPE" >> $GITHUB_OUTPUT
-          # נתיב על‑Drive – נשתמש בו ב‑step 6
-          echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> $GITHUB_OUTPUT
-
-      # --------------------------------------------------------------
-      # 4️⃣  Create temporary working directory
-      # --------------------------------------------------------------
-      - name: Create temporary directory
-        id: tmpdir
-        run: |
-          TMPDIR=$(mktemp -d)
-          echo "tmpdir=$TMPDIR" >> $GITHUB_OUTPUT
-
-      # --------------------------------------------------------------
-name: Upload URL → Google Drive (clean links, no zip)
-
-# הרצה ידנית מה‑UI של GitHub
-on:
-  workflow_dispatch:
-    inputs:
-      url:
-        description: "כתובת URL של קובץ מדיה או של דף HTML"
-        required: true
-        default: "https://commons.wikimedia.org/wiki/File:Bilby_Looking_for_food_at_night.webm"
-      folder:
-        description: "תיקיית יעד ב‑Drive (ללא שם קובץ)"
-        required: true
-        default: "MyUploads"
-      filename:
-        description: "שם קובץ לבסיס (בלי סיומת). אם ריק – ייקח מה‑URL/כותרת הדף"
-        required: false
-        default: ""
-
-jobs:
-  upload:
-    runs-on: ubuntu-latest
-    steps:
-      # --------------------------------------------------------------
-      # 0️⃣  Checkout – רק בשביל שה‑UI של GitHub יראה את ה‑workflow
-      # --------------------------------------------------------------
-      - name: Checkout repository (required for UI)
-        uses: actions/checkout@v3
-
-      # --------------------------------------------------------------
-      # 1️⃣  Install rclone + lynx (חילוץ כותרת HTML)
-      # --------------------------------------------------------------
       - name: Install rclone + Playwright
         run: |
           curl -s https://rclone.org/install.sh | sudo bash
+
           sudo apt-get update -qq
           sudo apt-get install -y lynx
 
           npm init -y
           npm install playwright
           npx playwright install --with-deps chromium
+
       # --------------------------------------------------------------
-      # 2️⃣  Write rclone config (remote בשם gdrive)
+      # 2️⃣ Write rclone config
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
           RCLONE_GDRIVE_TOKEN: ${{ secrets.RCLONE_GDRIVE_TOKEN }}
         run: |
           mkdir -p ~/.config/rclone
+
           cat > ~/.config/rclone/rclone.conf <<EOF
           [gdrive]
           type = drive
@@ -158,9 +77,9 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣  Resolve content‑type ובחירת שם בסיס (base name)
+      # 3️⃣ Resolve content-type ובחירת שם בסיס
       # --------------------------------------------------------------
-      - name: Resolve content‑type & base name
+      - name: Resolve content-type & base name
         id: resolve
         env:
           FILE_URL: ${{ github.event.inputs.url }}
@@ -168,23 +87,35 @@ jobs:
         run: |
           set -e
 
-          # --- 3.1 – קבלת Content‑Type ----------------------------
           CONTENT_TYPE=$(curl -sI -L "$FILE_URL" \
-                          | awk -F': ' '/^[Cc]ontent-[Tt]ype/ {print $2}' \
-                          | tr -d '\r')
-          echo "🕵️ Content‑Type = $CONTENT_TYPE"
+                          | awk -F': ' 'tolower($1)=="content-type" {v=$2} END{print v}' \
+                          | tail -n 1 \
+                          | sed 's/[[:space:]]*$//')
 
-          # --- 3.2 – בחירת שם בסיס (Base name) -------------------
+          echo "🕵️ Content-Type = $CONTENT_TYPE"
+
           if [[ -n "$USER_NAME" ]]; then
-            BASE_NAME="$USER_NAME"
+            BASE_NAME=$(python3 - "$USER_NAME" <<'PY'
+          import sys, re
+          s = sys.argv[1].strip()
+          s = re.sub(r'[\\/:*?"<>|]+', '_', s)
+          s = re.sub(r'\s+', ' ', s)
+          print((s[:120] or "page").strip())
+          PY
+          )
           else
             if [[ "$CONTENT_TYPE" == text/html* ]]; then
-              # דף HTML – חילוץ <title>
               PAGE_TITLE=$(curl -sL "$FILE_URL" | lynx -dump -force_html -nolist -stdin | head -n 1)
-              CLEAN_TITLE=$(echo "$PAGE_TITLE" | tr -cd '[:alnum:] _-')
-              BASE_NAME="${CLEAN_TITLE:-page}"
+
+              BASE_NAME=$(python3 - "$PAGE_TITLE" <<'PY'
+          import sys, re
+          s = sys.argv[1].strip()
+          s = re.sub(r'[\\/:*?"<>|]+', '_', s)
+          s = re.sub(r'\s+', ' ', s)
+          print((s[:120] or "page").strip())
+          PY
+          )
             else
-              # קובץ מדיה – שם קובץ מה‑URL ללא סיומת
               raw_name=$(basename "$FILE_URL")
               raw_name=${raw_name%%\?*}
               BASE_NAME="${raw_name%.*}"
@@ -192,22 +123,24 @@ jobs:
           fi
 
           echo "🔤 Base name = $BASE_NAME"
-          echo "base_name=$BASE_NAME" >> $GITHUB_OUTPUT
-          echo "content_type=$CONTENT_TYPE" >> $GITHUB_OUTPUT
-          # נתיב על‑Drive – נשתמש בו ב‑step 6
-          echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> $GITHUB_OUTPUT
+
+          echo "base_name=$BASE_NAME" >> "$GITHUB_OUTPUT"
+          echo "content_type=$CONTENT_TYPE" >> "$GITHUB_OUTPUT"
+          echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> "$GITHUB_OUTPUT"
 
       # --------------------------------------------------------------
-      # 4️⃣  Create temporary working directory
+      # 4️⃣ Create temporary working directory
       # --------------------------------------------------------------
       - name: Create temporary directory
         id: tmpdir
         run: |
           TMPDIR=$(mktemp -d)
-          echo "tmpdir=$TMPDIR" >> $GITHUB_OUTPUT
+          echo "tmpdir=$TMPDIR" >> "$GITHUB_OUTPUT"
 
       # --------------------------------------------------------------
-      - name: Download / scroll / extract clean links / upload (no zip)
+      # 5️⃣ Download / scroll / extract clean links / upload
+      # --------------------------------------------------------------
+      - name: Download / scroll / extract clean links / upload
         env:
           FILE_URL: ${{ github.event.inputs.url }}
           CONTENT_TYPE: ${{ steps.resolve.outputs.content_type }}
@@ -215,11 +148,8 @@ jobs:
           REMOTE_BASE: ${{ steps.resolve.outputs.remote_base }}
           TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
 
-          # כמה פעמים לגלול למטה
-          SCROLL_PASSES: "10"
-
-          # זמן המתנה אחרי כל גלילה, באלפיות שנייה
-          SCROLL_WAIT_MS: "1500"
+          SCROLL_PASSES: ${{ github.event.inputs.scroll_passes }}
+          SCROLL_WAIT_MS: ${{ github.event.inputs.scroll_wait_ms }}
 
         run: |
           set -e
@@ -229,7 +159,8 @@ jobs:
           # ------------------- קובץ מדיה ---------------------------
           if [[ "$CONTENT_TYPE" != text/html* ]]; then
             echo "📥 Downloading media file → $BASE_NAME"
-            curl -L -s -o "$BASE_NAME" "$FILE_URL"
+
+            curl -L -f -sS -o "$BASE_NAME" "$FILE_URL"
 
             echo "🚀 Uploading media file directly to Drive"
             rclone copy "$BASE_NAME" "$REMOTE_BASE" --progress
@@ -239,11 +170,10 @@ jobs:
             cat > extract_links.js <<'NODE'
             const { chromium } = require('playwright');
             const fs = require('fs');
-            const { URL } = require('url');
 
             const fileUrl = process.env.FILE_URL;
-            const passes = Number(process.env.SCROLL_PASSES || '10');
-            const waitMs = Number(process.env.SCROLL_WAIT_MS || '1500');
+            const passes = Math.max(1, Number(process.env.SCROLL_PASSES || '20'));
+            const waitMs = Math.max(250, Number(process.env.SCROLL_WAIT_MS || '1500'));
 
             const mediaExt = /\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)(?:[?#].*)?$/i;
 
@@ -255,15 +185,20 @@ jobs:
               let u = raw.trim();
               if (!u) return null;
 
+              u = u.replace(/^["']|["']$/g, '');
               u = u.replace(/&amp;/g, '&');
-              u = u.replace(/[)}\],;]+$/, '');
+              u = u.replace(/[)}\].,;]+$/, '');
 
               if (u.startsWith('//')) u = 'https:' + u;
               if (u.startsWith('/')) u = 'https://commons.wikimedia.org' + u;
 
               try {
                 const parsed = new URL(u);
-                if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+
+                if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+                  return null;
+                }
+
                 parsed.hash = '';
                 return parsed.toString();
               } catch {
@@ -271,12 +206,33 @@ jobs:
               }
             }
 
-            function addDirect(raw) {
-              const u = cleanUrl(raw);
-              if (!u) return;
+            function isCommonsFilePage(parsed) {
+              return /(^|\.)commons\.wikimedia\.org$/i.test(parsed.hostname) &&
+                     /^\/wiki\/File:/i.test(parsed.pathname);
+            }
 
-              if (mediaExt.test(u)) {
-                directLinks.add(u);
+            function addDirect(raw) {
+              const parts = String(raw).split(',');
+
+              for (const part of parts) {
+                const token = part.trim().split(/\s+/)[0];
+                const u = cleanUrl(token);
+
+                if (!u) continue;
+
+                let p;
+                try {
+                  p = new URL(u);
+                } catch {
+                  continue;
+                }
+
+                // דפי קובץ הם HTML, לא קישור ישיר לקובץ
+                if (isCommonsFilePage(p)) continue;
+
+                if (mediaExt.test(u)) {
+                  directLinks.add(u);
+                }
               }
             }
 
@@ -291,7 +247,8 @@ jobs:
                 return;
               }
 
-              if (!/commons\.wikimedia\.org$/i.test(p.hostname)) return;
+              if (!/(^|\.)commons\.wikimedia\.org$/i.test(p.hostname)) return;
+              if (!/^\/wiki\/File:/i.test(p.pathname)) return;
 
               let title;
               try {
@@ -300,11 +257,13 @@ jobs:
                 title = p.pathname.replace(/^\/wiki\/File:/i, '');
               }
 
-              if (!/\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)$/i.test(title)) {
+              if (!/\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)(?:[?#].*)?$/i.test(title)) {
                 return;
               }
 
               const safe = encodeURIComponent(title).replace(/%20/g, '_');
+
+              // קישור הורדה ישיר ב־Commons. הוא מפנה לקובץ המקורי.
               directLinks.add(`https://commons.wikimedia.org/wiki/Special:Redirect/file/${safe}`);
             }
 
@@ -316,11 +275,12 @@ jobs:
                 addDirect(m[0]);
               }
 
-              // דפי קובץ ב־Commons — נמיר ללינק ישיר
+              // דפי קובץ מ־Commons
               for (const m of text.matchAll(/https?:\/\/commons\.wikimedia\.org\/wiki\/File:[^\s"'<>\\]+/gi)) {
                 addFilePage(m[0]);
               }
 
+              // דפי קובץ יחסיים
               for (const m of text.matchAll(/\/wiki\/File:[^\s"'<>\\]+/gi)) {
                 addFilePage(m[0]);
               }
@@ -328,11 +288,29 @@ jobs:
 
             async function collectFromPage(page) {
               const values = await page.evaluate(() => {
+                const attrs = [
+                  'href',
+                  'src',
+                  'data-src',
+                  'data-url',
+                  'data-file-url',
+                  'data-original',
+                  'data-original-url',
+                  'data-media-url',
+                  'data-href',
+                  'data-file',
+                  'data-thumb-url',
+                  'srcset',
+                  'data-srcset'
+                ];
+
                 const selectors = [
                   'a[href]',
                   'img',
                   'video',
                   'source',
+                  'meta[property="og:image"]',
+                  'meta[name="twitter:image"]',
                   '[src]',
                   '[data-src]',
                   '[data-url]',
@@ -347,20 +325,6 @@ jobs:
 
                 const out = [];
 
-                const attrs = [
-                  'href',
-                  'src',
-                  'data-src',
-                  'data-url',
-                  'data-file-url',
-                  'data-original',
-                  'data-original-url',
-                  'data-media-url',
-                  'data-href',
-                  'data-file',
-                  'data-thumb-url'
-                ];
-
                 document.querySelectorAll(selectors).forEach(el => {
                   for (const a of attrs) {
                     const v = el.getAttribute(a);
@@ -369,14 +333,20 @@ jobs:
 
                   const srcset = el.getAttribute('srcset');
                   if (srcset) out.push(srcset);
+
+                  const dataSrcset = el.getAttribute('data-srcset');
+                  if (dataSrcset) out.push(dataSrcset);
                 });
 
-                const bodyText = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                const bodyText = document.body
+                  ? (document.body.innerText || document.body.textContent || '')
+                  : '';
+
                 if (bodyText) out.push(bodyText);
 
-                // לפעמים ויקישיתוף מכניסה מידע בתוך script JSON
                 document.querySelectorAll('script').forEach(script => {
                   const t = script.textContent || '';
+
                   if (
                     t.includes('commons.wikimedia.org') ||
                     /\/wiki\/File:|Special:Redirect\/file|\.webm|\.mp4|\.jpg|\.png|\.gif/i.test(t)
@@ -393,13 +363,46 @@ jobs:
               }
             }
 
+            async function clickLoadMore(page) {
+              const selectors = [
+                'button:has-text("Load more")',
+                'button:has-text("טען עוד")',
+                'button:has-text("טוען עוד")',
+                'button:has-text("עוד תוצאות")',
+                'a:has-text("Load more")',
+                'a:has-text("טען עוד")',
+                'a:has-text("טוען עוד")',
+                'a:has-text("עוד תוצאות")',
+                '[class*="load-more"]',
+                '[class*="LoadMore"]'
+              ];
+
+              for (const selector of selectors) {
+                const loc = page.locator(selector).first();
+
+                if (await loc.isVisible({ timeout: 1000 }).catch(() => false)) {
+                  await loc.click({ timeout: 5000 }).catch(() => {});
+                  await page.waitForTimeout(800);
+                }
+              }
+            }
+
             (async () => {
-              const browser = await chromium.launch({ headless: true });
+              if (!fileUrl) {
+                throw new Error('FILE_URL is empty');
+              }
+
+              const browser = await chromium.launch({
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox']
+              });
 
               const page = await browser.newPage({
                 viewport: { width: 1440, height: 1200 },
                 userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
               });
+
+              page.setDefaultTimeout(60000);
 
               console.log(`Opening: ${fileUrl}`);
 
@@ -410,25 +413,46 @@ jobs:
 
               await page.waitForTimeout(3000);
 
-              for (let i = 0; i < passes; i++) {
-                await page.evaluate((i) => {
-                  const step = Math.max(800, Math.floor((window.innerHeight || 900) * 0.85));
-                  window.scrollBy(0, step);
+              await page.waitForSelector(
+                'a[href*="/wiki/File:"], a[href*="Special:Redirect/file"]',
+                { timeout: 60000 }
+              ).catch(() => {
+                console.log('No file links found yet; continuing anyway.');
+              });
 
-                  const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
-                  if (window.scrollY >= maxScroll - 10) {
+              await collectFromPage(page);
+
+              for (let i = 0; i < passes; i++) {
+                await page.evaluate((step) => {
+                  const h = window.innerHeight || 900;
+                  const scrollStep = Math.max(700, Math.floor(h * 0.85));
+
+                  window.scrollBy(0, scrollStep);
+
+                  if (window.scrollY >= document.documentElement.scrollHeight - h - 10) {
                     window.scrollTo(0, 0);
-                    window.scrollBy(0, step * (i + 1));
+                    window.scrollBy(0, scrollStep * (step + 1));
                   }
                 }, i);
 
                 await page.waitForTimeout(waitMs);
+
+                await clickLoadMore(page);
+
+                await page.waitForTimeout(Math.min(1000, waitMs));
+
                 await collectFromPage(page);
 
                 console.log(`pass ${i + 1}/${passes}: direct links=${directLinks.size}`);
               }
 
+              await page.evaluate(() => {
+                window.scrollTo(0, document.documentElement.scrollHeight);
+              });
+
+              await page.waitForTimeout(2000);
               await collectFromPage(page);
+
               await browser.close();
 
               const lines = [...directLinks].sort();
@@ -457,7 +481,7 @@ jobs:
           fi
 
       # --------------------------------------------------------------
-      # 6️⃣  Clean‑up (runner יסגור את /tmp אוטומטית, רק לשם שכמט)
+      # 6️⃣ Clean-up
       # --------------------------------------------------------------
       - name: Clean temporary files
         if: always()
