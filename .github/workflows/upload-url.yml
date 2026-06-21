@@ -22,13 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # --------------------------------------------------------------
-      # 0️⃣ Checkout – רק בשביל שה‑UI של GitHub יראה את ה‑workflow
+      # 0️⃣  Checkout – רק בשביל שה‑UI של GitHub יראה את ה‑workflow
       # --------------------------------------------------------------
       - name: Checkout repository (required for UI)
         uses: actions/checkout@v3
 
       # --------------------------------------------------------------
-      # 1️⃣ Install rclone + lynx (חילוץ כותרת HTML)
+      # 1️⃣  Install rclone + lynx (חילוץ כותרת HTML)
       # --------------------------------------------------------------
       - name: Install rclone and lynx
         run: |
@@ -37,7 +37,7 @@ jobs:
           sudo apt-get install -y lynx
 
       # --------------------------------------------------------------
-      # 2️⃣ Write rclone config (remote בשם gdrive)
+      # 2️⃣  Write rclone config (remote בשם gdrive)
       # --------------------------------------------------------------
       - name: Write rclone config
         env:
@@ -52,7 +52,7 @@ jobs:
           EOF
 
       # --------------------------------------------------------------
-      # 3️⃣ Resolve content‑type ובחירת שם בסיס (base name)
+      # 3️⃣  Resolve content‑type ובחירת שם בסיס (base name)
       # --------------------------------------------------------------
       - name: Resolve content‑type & base name
         id: resolve
@@ -89,7 +89,7 @@ jobs:
           echo "remote_base=gdrive:${{ github.event.inputs.folder }}/$BASE_NAME" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 4️⃣ Create temporary working directory
+      # 4️⃣  Create temporary working directory
       # --------------------------------------------------------------
       - name: Create temporary directory
         id: tmpdir
@@ -98,7 +98,7 @@ jobs:
           echo "tmpdir=$TMPDIR" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 5️⃣ Download / extract clean links / upload (no zip)
+      # 5️⃣  Download / extract clean links / upload (no zip)
       # --------------------------------------------------------------
       - name: Download / extract clean links / upload (no zip)
         env:
@@ -107,54 +107,54 @@ jobs:
           BASE_NAME: ${{ steps.resolve.outputs.base_name }}
           REMOTE_BASE: ${{ steps.resolve.outputs.remote_base }}
           TMPDIR: ${{ steps.tmpdir.outputs.tmpdir }}
-        run: |
-          set -e
-          set -o pipefail
-          cd "$TMPDIR"
+        run: |2
+            set -e
+            set -o pipefail
+            cd "$TMPDIR"
 
-          # ---------- קובץ מדיה ----------
-          if [[ "$CONTENT_TYPE" != text/html* ]]; then
-            echo "📥 Downloading media file → $BASE_NAME"
-            curl -L -s -o "$BASE_NAME" "$FILE_URL"
+            # ---------- קובץ מדיה ----------
+            if [[ "$CONTENT_TYPE" != text/html* ]]; then
+              echo "📥 Downloading media file → $BASE_NAME"
+              curl -L -s -o "$BASE_NAME" "$FILE_URL"
 
-            echo "🚀 Uploading media file directly to Drive"
-            rclone copy "$BASE_NAME" "$REMOTE_BASE" --progress
+              echo "🚀 Uploading media file directly to Drive"
+              rclone copy "$BASE_NAME" "$REMOTE_BASE" --progress
 
-          # ---------- דף HTML ----------
-          else
-            echo "📄 Downloading HTML page"
-            curl -L -s -o "page.html" "$FILE_URL"
+            # ---------- דף HTML ----------
+            else
+              echo "📄 Downloading HTML page"
+              curl -L -s -o "page.html" "$FILE_URL"
 
-            echo "🔎 Extracting direct media links"
-            MEDIA_REGEX='https?://[^" ]+\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)'
+              echo "🔎 Extracting direct media links"
+              MEDIA_REGEX='https?://[^" ]+\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac)'
 
-            grep -Eo "$MEDIA_REGEX" "page.html" \
-                | sed -E 's/[?&#].*$//' \
-                | sort -u > "links.txt"
+              grep -Eo "$MEDIA_REGEX" "page.html" \
+                  | sed -E 's/[?&#].*$//' \
+                  | sort -u > "links.txt"
 
-            # --- Wikimedia Commons MediaSearch ---
-            if [[ "$FILE_URL" == *"commons.wikimedia.org"*"Special%3AMediaSearch"* ]]; then
-              echo "🔎 Detected Wikimedia Commons MediaSearch page"
+              # --- Wikimedia Commons MediaSearch ---
+              if [[ "$FILE_URL" == *"commons.wikimedia.org"*"Special%3AMediaSearch"* ]]; then
+                echo "🔎 Detected Wikimedia Commons MediaSearch page"
 
-              SEARCH_QUERY=$(echo "$FILE_URL" \
-                | sed -E 's/.*search=([^&]+).*/\1/' \
-                | python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote_plus(sys.stdin.read().strip()))')
+                SEARCH_QUERY=$(echo "$FILE_URL" \
+                  | sed -E 's/.*search=([^&]+).*/\1/' \
+                  | python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote_plus(sys.stdin.read().strip()))')
 
-              echo "🔎 Search query = $SEARCH_QUERY"
+                echo "🔎 Search query = $SEARCH_QUERY"
 
-              > "api_links.txt"
-              PAGES=5
-              LIMIT=50
+                > "api_links.txt"
+                PAGES=5
+                LIMIT=50
 
-              for (( i=1; i<=PAGES; i++ )); do
-                OFFSET=$(( (i - 1) * LIMIT ))
-                API_URL="https://commons.wikimedia.org/w/api.php?action=query&list=search&srsearch=${SEARCH_QUERY// /%20}&srlimit=${LIMIT}&sroffset=${OFFSET}&format=json"
+                for (( i=1; i<=PAGES; i++ )); do
+                  OFFSET=$(( (i - 1) * LIMIT ))
+                  API_URL="https://commons.wikimedia.org/w/api.php?action=query&list=search&srsearch=${SEARCH_QUERY// /%20}&srlimit=${LIMIT}&sroffset=${OFFSET}&format=json"
 
-                echo "📥 Fetching API page $i / $PAGES (offset=$OFFSET)"
-                curl -sL "$API_URL" -o "api_page_$i.json"
+                  echo "📥 Fetching API page $i / $PAGES (offset=$OFFSET)"
+                  curl -sL "$API_URL" -o "api_page_$i.json"
 
-                # ---- חילוץ קישורים מה‑JSON ----
-                python3 - <<'PY'
+                  # ---- חילוץ קישורים מה‑JSON ----
+                  python3 - <<'PY'
 import json
 import re
 import urllib.parse
@@ -185,23 +185,23 @@ for path in Path('.').glob('api_page_*.json'):
 
 Path('api_links.txt').write_text('\n'.join(sorted(links)) + '\n', encoding='utf-8')
 PY
-                # הוספת תוצאות API לרשימה הכללית
-                if [[ -s "api_links.txt" ]]; then
-                  cat "api_links.txt" >> "links.txt"
-                fi
-              done
+                  # הוספת תוצאות API לרשימה הכללית
+                  if [[ -s "api_links.txt" ]]; then
+                    cat "api_links.txt" >> "links.txt"
+                  fi
+                done
 
-              sort -u "links.txt" -o "links.txt"
+                sort -u "links.txt" -o "links.txt"
+              fi
+
+              # אם אחרי הניקוי הקובץ ריק – נכתוב הודעה ברורה
+              if [[ ! -s "links.txt" ]]; then
+                echo "No clean direct media links were found on the page." > "links.txt"
+              fi
+
+              echo "🚀 Uploading the cleaned links file as ${BASE_NAME}.txt"
+              rclone copy "links.txt" "${REMOTE_BASE}.txt" --progress
             fi
-
-            # אם אחרי הניקוי הקובץ ריק – נכתוב הודעה ברורה
-            if [[ ! -s "links.txt" ]]; then
-              echo "No clean direct media links were found on the page." > "links.txt"
-            fi
-
-            echo "🚀 Uploading the cleaned links file as ${BASE_NAME}.txt"
-            rclone copy "links.txt" "${REMOTE_BASE}.txt" --progress
-          fi
 
       # --------------------------------------------------------------
       # 6️⃣ Clean‑up (runner יסגור את /tmp אוטומטית, רק לשם שכמט)
