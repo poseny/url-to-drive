@@ -2,14 +2,11 @@ name: YouTube Download via Tor (secret COOKIE_URLENCODED)
 
 on:
   workflow_dispatch:
-  # אפשר להוסיף ריצות מתוזמנות, למשל:
-  # schedule:
-  #   - cron: "0 3 * * *"
 
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 40                     # Tor הוא איטי → מקצים זמן נוסף
+    timeout-minutes: 40                # Tor הוא איטי → נותנים זמן נוסף
     env:
       EMAIL_FROM: p0556722432@gmail.com
       EMAIL_TO:   p0556722432@gmail.com
@@ -25,7 +22,7 @@ jobs:
           ref: main
 
       # --------------------------------------------------------------
-      # 2️⃣ Install Tor & utilities
+      # 2️⃣ Install Tor & basic tools
       # --------------------------------------------------------------
       - name: Install Tor & utilities
         run: |
@@ -33,7 +30,7 @@ jobs:
           sudo apt-get install -y tor curl
 
       # --------------------------------------------------------------
-      # 3️⃣ Start Tor daemon and verify
+      # 3️⃣ Start Tor daemon and verify it works
       # --------------------------------------------------------------
       - name: Start Tor daemon
         run: |
@@ -43,12 +40,12 @@ jobs:
             sudo netstat -tlnp | grep -q 9050 && break
             sleep 5
           done
-          echo "🔎 Verifying exit node …"
+          echo "🔎 Verifying Tor exit node …"
           if curl --silent --socks5 127.0.0.1:9050 https://check.torproject.org \
                  | grep -q "Congratulations"; then
-            echo "✅ Tor is up and working"
+            echo "✅ Tor is up"
           else
-            echo "⚠️ Tor test failed – you may still continue, but requests will be direct"
+            echo "⚠️ Tor test failed – requests will be direct"
           fi
 
       # --------------------------------------------------------------
@@ -61,36 +58,35 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       # --------------------------------------------------------------
-      # 5️⃣ Create Netscape cookie file from secret COOKIE_URLENCODED
+      # 5️⃣ Create a **real** Netscape cookie file from the secret
       # --------------------------------------------------------------
       - name: Create Netscape cookie file from secret
-        id: cookies               # מאפשר להשתמש ב‑outputs של שלב זה
+        id: cookies               # מאפשר לשלב הבא לקבל את הנתיב בקבוע cookie_file
         env:
           COOKIE_URLENCODED: ${{ secrets.COOKIE_URLENCODED }}
         run: |
           set -euo pipefail
 
-          echo "🔎 Checking secret …"
+          # ---------- בדיקת קיום הסוד ----------
           if [[ -z "${COOKIE_URLENCODED:-}" ]]; then
             echo "❌ Secret COOKIE_URLENCODED is missing or empty."
             echo "cookie_file=" >> $GITHUB_OUTPUT
             exit 1
           fi
 
-          # מידע דיבאג (אורך + hash חלקי) – לא חושף ערך אמיתי
-          echo "✅ Secret length: ${#COOKIE_URLENCODED} characters"
+          echo "✅ Secret length: ${#COOKIE_URLENCODED}"
           HASH=$(printf "%s" "$COOKIE_URLENCODED" | sha256sum | cut -c1-8)
-          echo "✅ Secret SHA‑256 (first 8 chars): $HASH"
+          echo "✅ Secret SHA‑256 (first 8 chars) = $HASH"
 
-          # הפקת קובץ Netscape באמצעות Python (מקבל את הסוד דרך os.getenv)
+          # ---------- הפקת קובץ Netscape ----------
           python3 - <<'PY' > /tmp/cookies_from_secret.txt
           import os, urllib.parse, hashlib, sys
 
           raw = os.getenv('COOKIE_URLENCODED')
-          # חישוב hash שוב – רק לצורך הדפסה ב‑file (לא גלוי מכיוון שה‑hash קצר)
-          h = hashlib.sha256(raw.encode('utf-8')).hexdigest()[:8]
-          print(f"# generated from secret (sha256={h})")
+          # שורת הכותרת חייבת להיות הראשונה!
           print("# Netscape HTTP Cookie File")
+          # שורת מידע נוספת – מותרת, רק אחרי הכותרת.
+          print(f"# generated from secret (sha256={hashlib.sha256(raw.encode()).hexdigest()[:8]})")
           print("# https://curl.se/docs/http-cookies.html")
 
           for part in raw.split(';'):
@@ -100,41 +96,55 @@ jobs:
               name, value = part.split('=', 1)
               name = urllib.parse.unquote_plus(name)
               value = urllib.parse.unquote_plus(value)
-              # format: domain  flag  path  secure  expiration  name  value
+              # domain  flag  path  secure  expiration  name  value
               print(f".youtube.com\tFALSE\t/\tFALSE\t0\t{name}\t{value}")
           PY
 
-          # וידוא שהקובץ נוצר ולא ריק
+          # ---------- וידוא קיום וקובץ לא ריק ----------
           if [[ -s /tmp/cookies_from_secret.txt ]]; then
-            echo "✅ Cookie file successfully created → /tmp/cookies_from_secret.txt"
+            echo "✅ Cookie file created → /tmp/cookies_from_secret.txt"
             echo "cookie_file=/tmp/cookies_from_secret.txt" >> $GITHUB_OUTPUT
           else
-            echo "❌ Cookie file is empty – something went wrong while parsing."
+            echo "❌ Cookie file is empty – something went wrong."
             echo "cookie_file=" >> $GITHUB_OUTPUT
             exit 1
           fi
 
       # --------------------------------------------------------------
-      # 6️⃣ Debug – versions + cookie‑file info (אורך, hash, ראשי‑שורות)
+      # 6️⃣ Create a tiny install.log (כך שהמייל לא יסמן MISSING)
       # --------------------------------------------------------------
-      - name: Debug versions & show cookie file info
+      - name: Create dummy install.log
+        run: |
+          cat <<'EOF' > /tmp/install.log
+          === GITHUB INFO ===
+          GITHUB_WORKSPACE=$GITHUB_WORKSPACE
+          GITHUB_REF=$GITHUB_REF
+          GITHUB_SHA=$GITHUB_SHA
+          $(python3 --version)
+          $(python3 -m pip --version)
+          EOF
+
+      # --------------------------------------------------------------
+      # 7️⃣ Debug – versions + cookie‑file sanity check
+      # --------------------------------------------------------------
+      - name: Debug versions & cookie file sanity
         run: |
           set -e
-          echo "🧰 Python   : $(python3 --version)"
-          echo "🧰 yt‑dlp   : $(python3 -m yt_dlp --version)"
-          echo "🧰 Node     : $(node --version || true)"
+          echo "Python      : $(python3 --version)"
+          echo "yt‑dlp      : $(python3 -m yt_dlp --version)"
+          echo "Node (if any): $(node --version || true)"
 
           if [[ -n "${{ steps.cookies.outputs.cookie_file }}" && -f "${{ steps.cookies.outputs.cookie_file }}" ]]; then
-            echo "🔐 Cookie file exists – size:"
+            echo "✅ Cookie file exists – size:"
             wc -c "${{ steps.cookies.outputs.cookie_file }}"
-            echo "🔐 First 3 lines (sanitized):"
+            echo "✅ First 3 lines (sanitized):"
             head -n 3 "${{ steps.cookies.outputs.cookie_file }}" | sed 's/[^\t]*/*** /g'
           else
-            echo "⚠️ No cookie file was produced by the previous step."
+            echo "⚠️ No cookie file produced."
           fi
 
       # --------------------------------------------------------------
-      # 7️⃣ Download with yt‑dlp via Tor (משתמש במשתנה COOKIE_FILE)
+      # 8️⃣ Download with yt‑dlp via Tor (משתמש ב‑COOKIE_FILE)
       # --------------------------------------------------------------
       - name: Download with yt‑dlp via Tor
         id: dl
@@ -144,7 +154,6 @@ jobs:
           set -euo pipefail
           URL="https://www.youtube.com/watch?v=I60j6jur_TY"
 
-          # אפשרויות משותפות ל‑yt‑dlp
           COMMON_OPTS=(
             --force-ipv4
             --proxy "socks5://127.0.0.1:9050"
@@ -155,7 +164,6 @@ jobs:
             -o "/tmp/video.%(ext)s"
           )
 
-          # אם קובץ הקוקיז קיים – נוסיף את האופציה --cookies
           COOKIE_OPTS=()
           if [[ -n "${COOKIE_FILE:-}" && -f "$COOKIE_FILE" ]]; then
             echo "🔑 Using cookies from $COOKIE_FILE"
@@ -164,17 +172,13 @@ jobs:
             echo "🚫 No cookie file – proceeding without cookies"
           fi
 
-          # ---------------------------------------------------------
-          # ניסיון 1 – client=web (ללא או עם קוקיז)
-          # ---------------------------------------------------------
+          # ניסיון ראשון – client=web
           echo "=== Attempt 1 – client=web ==="
           python3 -m yt_dlp "${COMMON_OPTS[@]}" "${COOKIE_OPTS[@]}" \
             --extractor-args "youtube:player_client=web" "$URL" \
             2>&1 | tee /tmp/dl.log && exit 0 || true
 
-          # ---------------------------------------------------------
-          # אם יש קובץ קוקיז – מנסים client‑types נוספים
-          # ---------------------------------------------------------
+          # אם קובץ הקוקיז קיים – מנסים client‑types נוספים
           if [[ -n "${COOKIE_FILE:-}" && -f "$COOKIE_FILE" ]]; then
             for client in ios android tv mweb; do
               echo "=== Attempt – client=$client ==="
@@ -188,9 +192,9 @@ jobs:
           echo "DOWNLOAD_SUCCESS=no" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 8️⃣ Upload logs as artifact (אופציונלי – עוזר בדיבאג)
+      # 9️⃣ Upload artefacts (optional – משמש לדיבאג)
       # --------------------------------------------------------------
-      - name: Upload workflow logs as artifacts
+      - name: Upload logs as artefact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -201,7 +205,7 @@ jobs:
             /tmp/cookies_from_secret.txt
 
       # --------------------------------------------------------------
-      # 9️⃣ Send email with all logs
+      # 🔟 Send email with ALL logs
       # --------------------------------------------------------------
       - name: Send email with log
         if: always()
@@ -211,7 +215,7 @@ jobs:
           from email.mime.text import MIMEText
           from email.mime.multipart import MIMEMultipart
 
-          # קבצים שיש לצרף למייל
+          # רשימת קבצים להצגה במייל
           files = [
             "/tmp/install.log",
             "/tmp/dl.log",
@@ -219,12 +223,12 @@ jobs:
           ]
 
           body = ""
-          for path in files:
-            if os.path.exists(path):
-              with open(path, "r", errors="replace") as fh:
-                body += f"\n\n--- {path} ---\n" + fh.read()
+          for f in files:
+            if os.path.exists(f):
+              with open(f, "r", errors="replace") as fh:
+                body += f"\n\n--- {f} ---\n" + fh.read()
             else:
-              body += f"\n\n--- {path} MISSING ---\n"
+              body += f"\n\n--- {f} MISSING ---\n"
 
           msg = MIMEMultipart()
           msg["From"] = os.getenv("EMAIL_FROM")
