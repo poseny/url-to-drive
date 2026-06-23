@@ -1,4 +1,4 @@
-name: YouTube Download via Tor (secret COOKIE_URLENCODED)
+name: YouTube Download via Tor – Fresh Cookies & Rotating Exit
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 40                # Tor הוא איטי → נותנים זמן נוסף
+    timeout-minutes: 45                # Tor + retries → מניחים יותר זמן
     env:
       EMAIL_FROM: p0556722432@gmail.com
       EMAIL_TO:   p0556722432@gmail.com
@@ -22,192 +22,211 @@ jobs:
           ref: main
 
       # --------------------------------------------------------------
-      # 2️⃣ Install Tor & basic tools
+      # 2️⃣ Install system packages (tor, curl, netcat)
       # --------------------------------------------------------------
-      - name: Install Tor & utilities
+      - name: Install system utils
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y tor curl
+          sudo apt-get install -y tor curl netcat-openbsd
 
       # --------------------------------------------------------------
-      # 3️⃣ Start Tor daemon and verify it works
+      # 3️⃣ Configure Tor (US exit + ControlPort) and start service
       # --------------------------------------------------------------
-      - name: Start Tor daemon
+      - name: Configure & start Tor
         run: |
-          sudo service tor start
+          # Force US exits – מתאים אם אתה רוצה IP של ארצות הברית
+          sudo bash -c 'echo "ExitNodes {us}" >> /etc/tor/torrc'
+          sudo bash -c 'echo "StrictNodes 1"   >> /etc/tor/torrc'
+          # Enable ControlPort ללא auth (מתאימה רק ל‑runner זמני)
+          sudo bash -c 'echo "ControlPort 9051" >> /etc/tor/torrc'
+          sudo bash -c 'echo "CookieAuthentication 0" >> /etc/tor/torrc'
+          
+          sudo service tor restart
           echo "⏳ Waiting for Tor to listen on 9050 …"
           for i in $(seq 1 9); do
             sudo netstat -tlnp | grep -q 9050 && break
             sleep 5
           done
-          echo "🔎 Verifying Tor exit node …"
+          echo "🔎 Verify Tor exit node …"
           if curl --silent --socks5 127.0.0.1:9050 https://check.torproject.org \
                  | grep -q "Congratulations"; then
             echo "✅ Tor is up"
           else
-            echo "⚠️ Tor test failed – requests will be direct"
+            echo "⚠️ Tor test failed – will still try (direct connection may be used)."
           fi
 
       # --------------------------------------------------------------
       # 4️⃣ Install Python + yt‑dlp + plugin
       # --------------------------------------------------------------
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: |
           python3 -m pip install --user --upgrade pip
           python3 -m pip install --user "yt-dlp[default]" yt-dlp-ejs
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       # --------------------------------------------------------------
-      # 5️⃣ Create a **real** Netscape cookie file from the secret
+      # 5️⃣ Decode cookies from Base64 secret (COOKIE_B64)
       # --------------------------------------------------------------
-      - name: Create Netscape cookie file from secret
-        id: cookies               # מאפשר לשלב הבא לקבל את הנתיב בקבוע cookie_file
+      - name: Decode cookies.txt from secret
+        id: decode
         env:
-          COOKIE_URLENCODED: ${{ secrets.COOKIE_URLENCODED }}
+          COOKIE_B64: ${{ secrets.COOKIE_B64 }}
         run: |
           set -euo pipefail
-
-          # ---------- בדיקת קיום הסוד ----------
-          if [[ -z "${COOKIE_URLENCODED:-}" ]]; then
-            echo "❌ Secret COOKIE_URLENCODED is missing or empty."
+          if [[ -z "${COOKIE_B64:-}" ]]; then
+            echo "❌ Secret COOKIE_B64 is missing."
             echo "cookie_file=" >> $GITHUB_OUTPUT
             exit 1
           fi
-
-          echo "✅ Secret length: ${#COOKIE_URLENCODED}"
-          HASH=$(printf "%s" "$COOKIE_URLENCODED" | sha256sum | cut -c1-8)
-          echo "✅ Secret SHA‑256 (first 8 chars) = $HASH"
-
-          # ---------- הפקת קובץ Netscape ----------
-          python3 - <<'PY' > /tmp/cookies_from_secret.txt
-          import os, urllib.parse, hashlib, sys
-
-          raw = os.getenv('COOKIE_URLENCODED')
-          # שורת הכותרת חייבת להיות הראשונה!
-          print("# Netscape HTTP Cookie File")
-          # שורת מידע נוספת – מותרת, רק אחרי הכותרת.
-          print(f"# generated from secret (sha256={hashlib.sha256(raw.encode()).hexdigest()[:8]})")
-          print("# https://curl.se/docs/http-cookies.html")
-
-          for part in raw.split(';'):
-              part = part.strip()
-              if not part or '=' not in part:
-                  continue
-              name, value = part.split('=', 1)
-              name = urllib.parse.unquote_plus(name)
-              value = urllib.parse.unquote_plus(value)
-              # domain  flag  path  secure  expiration  name  value
-              print(f".youtube.com\tFALSE\t/\tFALSE\t0\t{name}\t{value}")
-          PY
-
-          # ---------- וידוא קיום וקובץ לא ריק ----------
-          if [[ -s /tmp/cookies_from_secret.txt ]]; then
-            echo "✅ Cookie file created → /tmp/cookies_from_secret.txt"
-            echo "cookie_file=/tmp/cookies_from_secret.txt" >> $GITHUB_OUTPUT
+          echo "$COOKIE_B64" | base64 -d > /tmp/yt_cookies.txt
+          if [[ -s /tmp/yt_cookies.txt ]]; then
+            echo "✅ Cookies decoded → /tmp/yt_cookies.txt"
+            echo "cookie_file=/tmp/yt_cookies.txt" >> $GITHUB_OUTPUT
           else
-            echo "❌ Cookie file is empty – something went wrong."
+            echo "❌ Decoded file is empty."
             echo "cookie_file=" >> $GITHUB_OUTPUT
             exit 1
           fi
 
       # --------------------------------------------------------------
-      # 6️⃣ Create a tiny install.log (כך שהמייל לא יסמן MISSING)
+      # 6️⃣ Generate a _real_ install.log (so the email isn’t empty)
       # --------------------------------------------------------------
-      - name: Create dummy install.log
+      - name: Generate install.log
         run: |
-          cat <<'EOF' > /tmp/install.log
-          === GITHUB INFO ===
-          GITHUB_WORKSPACE=$GITHUB_WORKSPACE
-          GITHUB_REF=$GITHUB_REF
-          GITHUB_SHA=$GITHUB_SHA
-          $(python3 --version)
-          $(python3 -m pip --version)
-          EOF
+          {
+            echo "=== GITHUB INFO ==="
+            echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+            echo "GITHUB_REF=$GITHUB_REF"
+            echo "GITHUB_SHA=$GITHUB_SHA"
+            echo "PYTHON=$(python3 --version)"
+            echo "PIP=$(python3 -m pip --version)"
+          } > /tmp/install.log
 
       # --------------------------------------------------------------
-      # 7️⃣ Debug – versions + cookie‑file sanity check
+      # 7️⃣ DEBUG – versions + cookie sanity
       # --------------------------------------------------------------
-      - name: Debug versions & cookie file sanity
+      - name: Debug versions & cookie sanity
         run: |
           set -e
-          echo "Python      : $(python3 --version)"
-          echo "yt‑dlp      : $(python3 -m yt_dlp --version)"
-          echo "Node (if any): $(node --version || true)"
-
-          if [[ -n "${{ steps.cookies.outputs.cookie_file }}" && -f "${{ steps.cookies.outputs.cookie_file }}" ]]; then
-            echo "✅ Cookie file exists – size:"
-            wc -c "${{ steps.cookies.outputs.cookie_file }}"
-            echo "✅ First 3 lines (sanitized):"
-            head -n 3 "${{ steps.cookies.outputs.cookie_file }}" | sed 's/[^\t]*/*** /g'
+          echo "Python   : $(python3 --version)"
+          echo "yt‑dlp   : $(python3 -m yt_dlp --version)"
+          if [[ -n "${{ steps.decode.outputs.cookie_file }}" && -f "${{ steps.decode.outputs.cookie_file }}" ]]; then
+            echo "✅ Cookie file size:"
+            wc -c "${{ steps.decode.outputs.cookie_file }}"
+            echo "✅ First 5 lines (sanitized):"
+            head -n 5 "${{ steps.decode.outputs.cookie_file }}" | sed 's/[^\t]*/*** /g'
           else
-            echo "⚠️ No cookie file produced."
+            echo "⚠️ No cookie file found."
           fi
 
       # --------------------------------------------------------------
-      # 8️⃣ Download with yt‑dlp via Tor (משתמש ב‑COOKIE_FILE)
+      # 8️⃣ Function: refresh Tor circuit (NEWNYM)
+      # --------------------------------------------------------------
+      - name: Refresh Tor circuit (NEWNYM)
+        id: newnym
+        run: |
+          # מוסיף רענון לכל נסיון – אפשר לקרוא את הפקודה שוב לפני כל קריאה ל‑yt‑dlp
+          if sudo netstat -tlnp | grep -q 9051; then
+            echo "AUTHENTICATE \"\"" | nc localhost 9051
+            echo "SIGNAL NEWNYM" | nc localhost 9051
+            sleep 5   # חכה שה‑circuit יתארגן
+            echo "✅ New Tor circuit requested"
+          else
+            echo "⚠️ ControlPort 9051 not open – skipping NEWNYM"
+          fi
+
+      # --------------------------------------------------------------
+      # 9️⃣ Download with yt‑dlp via Tor (with fresh cookies & headers)
       # --------------------------------------------------------------
       - name: Download with yt‑dlp via Tor
         id: dl
         env:
-          COOKIE_FILE: ${{ steps.cookies.outputs.cookie_file }}
+          COOKIE_FILE: ${{ steps.decode.outputs.cookie_file }}
         run: |
           set -euo pipefail
           URL="https://www.youtube.com/watch?v=I60j6jur_TY"
 
-          COMMON_OPTS=(
+          # ==== משותף לכל ניסיונות ====
+          COMMON=(
             --force-ipv4
             --proxy "socks5://127.0.0.1:9050"
             --socket-timeout 30
-            --retries 10
+            --retries 8
             --no-playlist
             -f "ba/b"
             -o "/tmp/video.%(ext)s"
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            --referer "https://www.youtube.com/"
+            --add-header "Accept-Language: en-US,en;q=0.9"
           )
-
           COOKIE_OPTS=()
           if [[ -n "${COOKIE_FILE:-}" && -f "$COOKIE_FILE" ]]; then
-            echo "🔑 Using cookies from $COOKIE_FILE"
             COOKIE_OPTS=(--cookies "$COOKIE_FILE")
-          else
-            echo "🚫 No cookie file – proceeding without cookies"
           fi
 
-          # ניסיון ראשון – client=web
-          echo "=== Attempt 1 – client=web ==="
-          python3 -m yt_dlp "${COMMON_OPTS[@]}" "${COOKIE_OPTS[@]}" \
+          # ---------------------------------------------------------
+          # נסיון 1 – client=web (עם Tor)
+          # ---------------------------------------------------------
+          echo "=== Attempt 1 – client=web (Tor) ==="
+          # רענון circuit לפני כל ניסיון (שימוש ב‑step newnym)
+          echo "AUTHENTICATE \"\" | nc localhost 9051; echo \"SIGNAL NEWNYM\" | nc localhost 9051; sleep 5" | bash
+          python3 -m yt_dlp "${COMMON[@]}" "${COOKIE_OPTS[@]}" \
             --extractor-args "youtube:player_client=web" "$URL" \
             2>&1 | tee /tmp/dl.log && exit 0 || true
 
-          # אם קובץ הקוקיז קיים – מנסים client‑types נוספים
-          if [[ -n "${COOKIE_FILE:-}" && -f "$COOKIE_FILE" ]]; then
-            for client in ios android tv mweb; do
-              echo "=== Attempt – client=$client ==="
-              python3 -m yt_dlp "${COMMON_OPTS[@]}" "${COOKIE_OPTS[@]}" \
-                --extractor-args "youtube:player_client=$client" "$URL" \
-                2>&1 | tee -a /tmp/dl.log && exit 0 || true
-            done
-          fi
+          # ---------------------------------------------------------
+          # אם נכשל – מנסים client‑types שונים (ios, android, tv, mweb)
+          # ---------------------------------------------------------
+          for client in ios android tv mweb; do
+            echo "=== Attempt – client=$client (Tor) ==="
+            echo "AUTHENTICATE \"\" | nc localhost 9051; echo \"SIGNAL NEWNYM\" | nc localhost 9051; sleep 5" | bash
+            python3 -m yt_dlp "${COMMON[@]}" "${COOKIE_OPTS[@]}" \
+              --extractor-args "youtube:player_client=$client" "$URL" \
+              2>&1 | tee -a /tmp/dl.log && exit 0 || true
+          done
 
-          echo "❌ All attempts failed"
+          # ---------------------------------------------------------
+          # אם עדיין נכשל – **fallback ל‑direct connection** (ללא Tor)
+          # ---------------------------------------------------------
+          echo "⚠️ All Tor attempts failed – falling back to direct connection (no proxy)."
+          DIRECT_COMMON=(
+            --force-ipv4
+            --socket-timeout 30
+            --retries 8
+            --no-playlist
+            -f "ba/b"
+            -o "/tmp/video.%(ext)s"
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            --referer "https://www.youtube.com/"
+            --add-header "Accept-Language: en-US,en;q=0.9"
+          )
+          for client in web ios android tv mweb; do
+            echo "=== Direct attempt – client=$client ==="
+            python3 -m yt_dlp "${DIRECT_COMMON[@]}" "${COOKIE_OPTS[@]}" \
+              --extractor-args "youtube:player_client=$client" "$URL" \
+              2>&1 | tee -a /tmp/dl.log && exit 0 || true
+          done
+
+          echo "❌ All attempts (Tor + direct) failed."
           echo "DOWNLOAD_SUCCESS=no" >> $GITHUB_OUTPUT
 
       # --------------------------------------------------------------
-      # 9️⃣ Upload artefacts (optional – משמש לדיבאג)
+      # 10️⃣ Upload artefacts (לבדיקה מאוחרת)
       # --------------------------------------------------------------
-      - name: Upload logs as artefact
+      - name: Upload logs as artefacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: workflow‑logs
+          name: yt-dlp-logs
           path: |
             /tmp/install.log
             /tmp/dl.log
-            /tmp/cookies_from_secret.txt
+            /tmp/yt_cookies.txt
 
       # --------------------------------------------------------------
-      # 🔟 Send email with ALL logs
+      # 11️⃣ Send email with ALL logs
       # --------------------------------------------------------------
-      - name: Send email with log
+      - name: Send email with logs
         if: always()
         run: |
           python3 <<'EOF'
@@ -215,11 +234,10 @@ jobs:
           from email.mime.text import MIMEText
           from email.mime.multipart import MIMEMultipart
 
-          # רשימת קבצים להצגה במייל
           files = [
             "/tmp/install.log",
             "/tmp/dl.log",
-            "/tmp/cookies_from_secret.txt"
+            "/tmp/yt_cookies.txt"
           ]
 
           body = ""
@@ -238,11 +256,11 @@ jobs:
           msg.attach(MIMEText(body, "plain"))
 
           try:
-            smtp = smtplib.SMTP("smtp.gmail.com", 587)
-            smtp.starttls()
-            smtp.login(os.getenv("EMAIL_FROM"), os.getenv("EMAIL_PASSWORD"))
-            smtp.send_message(msg)
-            smtp.quit()
+            s = smtplib.SMTP("smtp.gmail.com", 587)
+            s.starttls()
+            s.login(os.getenv("EMAIL_FROM"), os.getenv("EMAIL_PASSWORD"))
+            s.send_message(msg)
+            s.quit()
             print("✅ Email sent")
           except Exception as e:
             print("❌ Email failed:", e)
