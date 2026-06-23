@@ -1,276 +1,178 @@
-name: Debug Cookies V4 + Tor-Worker
+name: YouTube Download via Tor (secret COOKIE_URLENCODED)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'   # run nightly (optional)
 
 jobs:
-  debug:
+  download:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
-      TOR_WORKER_URL: "${{ secrets.TOR_WORKER_URL }}"
-      COOKIE_URLENCODED: "${{ secrets.COOKIE_URLENCODED }}"
+      EMAIL_FROM: p0556722432@gmail.com
+      EMAIL_TO:   p0556722432@gmail.com
+      EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
 
     steps:
-      # -------------------------------------------------------
-      # 1️⃣ (אופציונלי) שמירת קובץ cookies מקומי – אם יש
-      # -------------------------------------------------------
-      - name: Decode cookies (optional)
-        if: ${{ env.COOKIE_URLENCODED != '' }}
-        run: |
-          echo "${{ secrets.COOKIE_URLENCODED }}" | \
-            python -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read()))" \
-            > $GITHUB_WORKSPACE/cookies.txt
-          wc -c $GITHUB_WORKSPACE/cookies.txt
-
-      # -------------------------------------------------------
-      # 2️⃣ Checkout הקוד שלך
-      # -------------------------------------------------------
+      # ────────────────────────────────────────────────────────────────
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
           ref: main
 
-      # -------------------------------------------------------
-      # 3️⃣ Install dependencies and create install.log
-      # -------------------------------------------------------
-      - name: Install dependencies and create install.log
-        if: always()
+      # ────────────────────────────────────────────────────────────────
+      - name: Install Tor & utilities
         run: |
-          set +e
+          sudo apt-get update -y
+          sudo apt-get install -y tor curl
 
-          echo "=== GITHUB INFO ===" | tee /tmp/install.log
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" | tee -a /tmp/install.log
-          echo "GITHUB_REF=$GITHUB_REF" | tee -a /tmp/install.log
-          echo "GITHUB_SHA=$GITHUB_SHA" | tee -a /tmp/install.log
-          pwd | tee -a /tmp/install.log
-          ls -la "$GITHUB_WORKSPACE" | tee -a /tmp/install.log
-
-          echo "" | tee -a /tmp/install.log
-          echo "=== PYTHON / PIP ===" | tee -a /tmp/install.log
-
-          python3 --version 2>&1 | tee -a /tmp/install.log
-          echo "PYTHON EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
-
-          python3 -m pip --version 2>&1 | tee -a /tmp/install.log
-          echo "PIP VERSION EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
-
-          echo "" | tee -a /tmp/install.log
-          echo "=== PIP UPGRADE ===" | tee -a /tmp/install.log
-
-          python3 -m pip install --user --upgrade --no-cache-dir pip 2>&1 | tee -a /tmp/install.log
-          echo "PIP UPGRADE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
-
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "Added $HOME/.local/bin to PATH" | tee -a /tmp/install.log
-
-          echo "" | tee -a /tmp/install.log
-          echo "=== INSTALL YT-DLP + YT-DLP-EJS ===" | tee -a /tmp/install.log
-
-          python3 -m pip install --user --upgrade --no-cache-dir "yt-dlp[default]" 2>&1 | tee -a /tmp/install.log
-          YT_DLP_STATUS=${PIPESTATUS[0]}
-          echo "YT-DLP INSTALL EXIT CODE: $YT_DLP_STATUS" | tee -a /tmp/install.log
-
-          python3 -m pip install --user --upgrade --no-cache-dir yt-dlp-ejs 2>&1 | tee -a /tmp/install.log
-          YT_DLP_EJS_STATUS=${PIPESTATUS[0]}
-          echo "YT-DLP-EJS INSTALL EXIT CODE: $YT_DLP_EJS_STATUS" | tee -a /tmp/install.log
-
-          if [ "$YT_DLP_STATUS" -ne 0 ] || [ "$YT_DLP_EJS_STATUS" -ne 0 ]; then
-            echo "" | tee -a /tmp/install.log
-            echo "First install failed. Trying fallback install with ESO extra." | tee -a /tmp/install.log
-
-            python3 -m pip install --user --upgrade --no-cache-dir "yt-dlp[ESO,default]" yt-dlp-ejs 2>&1 | tee -a /tmp/install.log
-            echo "FALLBACK INSTALL EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
-          fi
-
-          echo "" | tee -a /tmp/install.log
-          echo "=== INSTALL / CHECK NODEJS ===" | tee -a /tmp/install.log
-
-          if ! command -v node >/dev/null 2>&1; then
-            echo "node not found, installing nodejs" | tee -a /tmp/install.log
-
-            sudo apt-get update 2>&1 | tee -a /tmp/install.log
-            echo "APT UPDATE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
-
-            sudo apt-get install -y nodejs 2>&1 | tee -a /tmp/install.log
-            echo "APT INSTALL NODEJS EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
-          else
-            echo "node already installed" | tee -a /tmp/install.log
-          fi
-
-          echo "" | tee -a /tmp/install.log
-          echo "=== VERSIONS ===" | tee -a /tmp/install.log
-
-          export PATH="$HOME/.local/bin:$PATH"
-          echo "PATH=$PATH" | tee -a /tmp/install.log
-
-          node --version 2>&1 | tee -a /tmp/install.log
-          echo "NODE EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
-
-          python3 -m yt_dlp --version 2>&1 | tee -a /tmp/install.log
-          echo "YT-DLP VERSION EXIT CODE: ${PIPESTATUS[0]}" | tee -a /tmp/install.log
-
-          python3 - <<'PY' | tee -a /tmp/install.log
-          import importlib.util
-
-          spec = importlib.util.find_spec("yt_dlp_ejs")
-          print("yt_dlp_ejs module:", spec.origin if spec else "NOT FOUND")
-          PY
-
-          echo "" | tee -a /tmp/install.log
-          echo "=== COOKIE FILES ===" | tee -a /tmp/install.log
-
-          COOKIE_FILES=()
-
-          if [ -f "$GITHUB_WORKSPACE/cookies_new.txt" ]; then
-            COOKIE_FILES+=("$GITHUB_WORKSPACE/cookies_new.txt")
-          fi
-
-          if [ -f "$GITHUB_WORKSPACE/www.youtube.com_cookies.txt" ]; then
-            COOKIE_FILES+=("$GITHUB_WORKSPACE/www.youtube.com_cookies.txt")
-          fi
-
-          if [ ${#COOKIE_FILES[@]} -eq 0 ]; then
-            echo "ERROR: no cookies file found" | tee -a /tmp/install.log
-          else
-            for COOKIE_FILE in "${COOKIE_FILES[@]}"; do
-              echo "Found cookies file:" | tee -a /tmp/install.log
-              echo "$COOKIE_FILE" | tee -a /tmp/install.log
-              ls -l "$COOKIE_FILE" | tee -a /tmp/install.log
-              wc -c "$COOKIE_FILE" | tee -a /tmp/install.log
-            done
-          fi
-
-      # -------------------------------------------------------
-      # 4️⃣ Debug – קריאות yt-dlp דרך Tor-Worker
-      # -------------------------------------------------------
-      - name: Debug formats and download attempts (via Tor-Worker)
-        if: always()
+      # ────────────────────────────────────────────────────────────────
+      - name: Start Tor daemon
+        id: tor
         run: |
-          set +e
-
-          URL="https://www.youtube.com/watch?v=I60j6jur_TY"
-          CLIENTS=(web ios android tv mweb)
-          YTDLP=(python3 -m yt_dlp)
-
-          export PATH="$HOME/.local/bin:$PATH"
-
-          # --- בניית כתובת ה-Worker --------------------------------
-          ENCODED_URL=$(python - <<'PY'
-          import sys, urllib.parse
-          print(urllib.parse.quote(sys.argv[1]))
-          PY "$URL")
-
-          PROXY_URL="${TOR_WORKER_URL}?url=${ENCODED_URL}&cookie=${COOKIE_URLENCODED}"
-          PROXY_ARG="--proxy $PROXY_URL"
-
-          echo "=== USING TOR-WORKER PROXY ==="
-          echo "$PROXY_URL"
-
-          # ---------------- LIST FORMATS -----------------
-          echo "=== LIST FORMATS (via Tor-Worker) ===" | tee /tmp/list_formats.txt
-          "${YTDLP[@]}" $PROXY_ARG \
-            --force-ipv4 \
-            --extractor-args "youtube:player_client=web" \
-            --skip-download \
-            --list-formats "$URL" 2>&1 | tee -a /tmp/list_formats.txt
-
-          # ---------------- DOWNLOAD ATTEMPTS -------------
-          echo "" > /tmp/log.txt
-          echo "=== DOWNLOAD ATTEMPTS (via Tor-Worker) ===" | tee -a /tmp/log.txt
-          SUCCESS="no"
-
-          # ---- ללא עוגיות ----
-          echo "--- NO_COOKIE CLIENT=web ---" | tee -a /tmp/log.txt
-          "${YTDLP[@]}" $PROXY_ARG \
-            --force-ipv4 \
-            --extractor-args "youtube:player_client=web" \
-            --no-playlist -f "ba/b" \
-            -o "/tmp/test_NO_COOKIE_web.%(ext)s" "$URL" 2>&1 | tee -a /tmp/log.txt
-          NO_COOKIE_STATUS=${PIPESTATUS[0]}
-          echo "DOWNLOAD EXIT CODE (NO_COOKIE, web): $NO_COOKIE_STATUS" | tee -a /tmp/log.txt
-          if [ "$NO_COOKIE_STATUS" -eq 0 ]; then
-            echo "NO_COOKIE|web" > /tmp/success.txt
-            SUCCESS="yes"
-          fi
-
-          # ---- אם עדיין נכשל, ננסה עם כל client ----
-          if [ "$SUCCESS" != "yes" ]; then
-            for CLIENT in "${CLIENTS[@]}"; do
-              echo "--- CLIENT=$CLIENT ---" | tee -a /tmp/log.txt
-              "${YTDLP[@]}" $PROXY_ARG \
-                --force-ipv4 \
-                --extractor-args "youtube:player_client=$CLIENT" \
-                --no-playlist -f "ba/b" \
-                -o "/tmp/test_${CLIENT}.%(ext)s" "$URL" 2>&1 | tee -a /tmp/log.txt
-              STATUS=${PIPESTATUS[0]}
-              echo "DOWNLOAD EXIT CODE ($CLIENT): $STATUS" | tee -a /tmp/log.txt
-              if [ "$STATUS" -eq 0 ]; then
-                echo "$CLIENT" > /tmp/success.txt
-                SUCCESS="yes"
-                break
-              fi
-            done
-          fi
-
-          if [ "$SUCCESS" != "yes" ]; then
-            echo "All download attempts failed." | tee -a /tmp/log.txt
+          sudo service tor start
+          for i in $(seq 1 9); do
+            sudo netstat -tlnp | grep -q 9050 && break
+            echo "Waiting for Tor … ($i/9)"; sleep 5
+          done
+          if curl --silent --socks5 127.0.0.1:9050 https://check.torproject.org | grep -q "Congratulations"; then
+            echo "Tor is up"
           else
-            echo "SUCCESS:" | tee -a /tmp/log.txt
-            cat /tmp/success.txt | tee -a /tmp/log.txt
+            echo "⚠️ Tor test failed"
           fi
 
-      # -------------------------------------------------------
-      # 5️⃣ שליחת המייל (הקוד המקורי שלך)
-      # -------------------------------------------------------
-      - name: Send email
-        if: always()
+      # ────────────────────────────────────────────────────────────────
+      - name: Install Python deps (yt‑dlp + plugin)
+        run: |
+          python3 -m pip install --user --upgrade pip
+          python3 -m pip install --user "yt-dlp[default]" yt-dlp-ejs
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "PATH=$HOME/.local/bin:$PATH" >> $GITHUB_ENV
+
+      # ────────────────────────────────────────────────────────────────
+      - name: Create Netscape cookie file from secret
+        id: cookies
         env:
-          EMAIL_FROM: p0556722432@gmail.com
-          EMAIL_TO: p0556722432@gmail.com
-          EMAIL_PASSWORD: "${{ secrets.EMAIL_PASSWORD }}"
+          COOKIE_URLENCODED: ${{ secrets.COOKIE_URLENCODED }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${COOKIE_URLENCODED:-}" ]]; then
+            echo "No COOKIE_URLENCODED secret – skipping cookie file creation."
+            echo "cookie_file=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          python3 - <<'PY' "${COOKIE_URLENCODED}"
+          import sys, urllib.parse, os
+          raw = sys.argv[1]
+          cookies = {}
+          for part in raw.split(';'):
+              part = part.strip()
+              if not part or '=' not in part:
+                  continue
+              name, value = part.split('=', 1)
+              cookies[urllib.parse.unquote_plus(name)] = urllib.parse.unquote_plus(value)
+
+          lines = ["# Netscape HTTP Cookie File",
+                   "# https://curl.se/docs/http-cookies.html"]
+          for n, v in cookies.items():
+              lines.append(f".youtube.com\tFALSE\t/\tFALSE\t0\t{n}\t{v}")
+
+          out = "/tmp/cookies_from_secret.txt"
+          with open(out, "w", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+          print(f"Created {out}")
+          PY "${COOKIE_URLENCODED}"
+          echo "cookie_file=/tmp/cookies_from_secret.txt" >> $GITHUB_OUTPUT
+
+      # ────────────────────────────────────────────────────────────────
+      - name: Debug versions & show cookie file info
+        run: |
+          set -e
+          echo "Python   : $(python3 --version)"
+          echo "yt‑dlp   : $(python3 -m yt_dlp --version)"
+          echo "Node     : $(node --version || true)"
+          if [[ -f "${{ steps.cookies.outputs.cookie_file }}" ]]; then
+            echo "Cookie file size:"
+            wc -c "${{ steps.cookies.outputs.cookie_file }}"
+          else
+            echo "No cookie file created."
+          fi
+
+      # ────────────────────────────────────────────────────────────────
+      - name: Download with yt‑dlp via Tor
+        id: dl
+        env:
+          COOKIE_FILE: ${{ steps.cookies.outputs.cookie_file }}
+        run: |
+          set -euo pipefail
+          URL="https://www.youtube.com/watch?v=I60j6jur_TY"
+          COMMON_OPTS=(
+            --force-ipv4
+            --proxy "socks5://127.0.0.1:9050"
+            --socket-timeout 30
+            --retries 10
+            --no-playlist
+            -f "ba/b"
+            -o "/tmp/video.%(ext)s"
+          )
+          if [[ -n "${COOKIE_FILE:-}" && -f "$COOKIE_FILE" ]]; then
+            echo "✅ Using cookies from $COOKIE_FILE"
+            COOKIE_OPTS=(--cookies "$COOKIE_FILE")
+          else
+            echo "⚠️ No cookie file – downloading without cookies"
+            COOKIE_OPTS=()
+          fi
+
+          echo "=== Attempt 1 – client=web ==="
+          python3 -m yt_dlp "${COMMON_OPTS[@]}" "${COOKIE_OPTS[@]}" \
+            --extractor-args "youtube:player_client=web" "$URL" \
+            2>&1 | tee /tmp/dl.log && exit 0 || true
+
+          if [[ -n "${COOKIE_FILE:-}" && -f "$COOKIE_FILE" ]]; then
+            for client in ios android tv mweb; do
+              echo "=== Attempt – client=$client ==="
+              python3 -m yt_dlp "${COMMON_OPTS[@]}" "${COOKIE_OPTS[@]}" \
+                --extractor-args "youtube:player_client=$client" "$URL" \
+                2>&1 | tee -a /tmp/dl.log && exit 0 || true
+            done
+          fi
+
+          echo "❌ All attempts failed"
+          echo "DOWNLOAD_SUCCESS=no" >> $GITHUB_OUTPUT
+
+      # ────────────────────────────────────────────────────────────────
+      - name: Send email with log
+        if: always()
         run: |
           python3 <<'EOF'
-          import smtplib
+          import os, smtplib
           from email.mime.text import MIMEText
           from email.mime.multipart import MIMEMultipart
-          import os
 
-          paths = [
-              "/tmp/install.log",
-              "/tmp/list_formats.txt",
-              "/tmp/log.txt",
-              "/tmp/success.txt"
-          ]
-
-          log_content = ""
-
-          for path in paths:
-              if os.path.exists(path):
-                  with open(path, "r", errors="replace") as f:
-                      log_content += f"\n\n========== {path} ==========\n"
-                      log_content += f.read()
+          files = ["/tmp/install.log", "/tmp/dl.log"]
+          body = ""
+          for f in files:
+              if os.path.exists(f):
+                  with open(f, "r", errors="replace") as fh:
+                      body += f"\n\n--- {f} ---\n" + fh.read()
               else:
-                  log_content += f"\n\n========== {path} MISSING ==========\n"
+                  body += f"\n\n--- {f} MISSING ---\n"
 
           msg = MIMEMultipart()
-          msg["From"] = os.environ["EMAIL_FROM"]
-          msg["To"] = os.environ["EMAIL_TO"]
-          msg["Subject"] = "YouTube Debug Log V4"
-
-          msg.attach(MIMEText(log_content, "plain"))
+          msg["From"] = os.getenv("EMAIL_FROM")
+          msg["To"]   = os.getenv("EMAIL_TO")
+          subject = "YT‑dlp Tor Debug – " + ("SUCCESS" if os.getenv("DOWNLOAD_SUCCESS")=="yes" else "FAIL")
+          msg["Subject"] = subject
+          msg.attach(MIMEText(body, "plain"))
 
           try:
-              server = smtplib.SMTP("smtp.gmail.com", 587)
-              server.starttls()
-              server.login(os.environ["EMAIL_FROM"], os.environ["EMAIL_PASSWORD"])
-              server.sendmail(
-                  os.environ["EMAIL_FROM"],
-                  os.environ["EMAIL_TO"],
-                  msg.as_string()
-              )
-              server.quit()
-              print("EMAIL SENT")
+              s = smtplib.SMTP("smtp.gmail.com", 587)
+              s.starttls()
+              s.login(os.getenv("EMAIL_FROM"), os.getenv("EMAIL_PASSWORD"))
+              s.send_message(msg)
+              s.quit()
+              print("✅ Email sent")
           except Exception as e:
-              print(f"EMAIL FAILED: {e}")
+              print("❌ Email failed:", e)
           EOF
