@@ -130,7 +130,7 @@ jobs:
 
             echo "🔎 Extracting **clean** direct‑media links"
             # רשימת סיומות למדיה – ניתן להוסיף אם צריך
-            MEDIA_REGEX='https?://[^"]+\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac|html|apk)'
+            MEDIA_REGEX='https?://[^"]+\.(webm|mp4|mkv|mov|avi|flv|wmv|jpg|jpeg|png|gif|svg|bmp|tif|tiff|pdf|mp3|ogg|wav|flac|aac|html|apk|gguf)'
 
             # 1️⃣ grep מוצא את כל הקישורים עם סיומת מדיה
             # 2️⃣ sed מוסיר כל מה שמופיע אחרי ? או # או & (נקודק נקודה)
